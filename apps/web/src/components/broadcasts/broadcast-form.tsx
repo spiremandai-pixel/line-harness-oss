@@ -9,6 +9,7 @@ interface BroadcastFormProps {
   tags: Tag[]
   onSuccess: () => void
   onCancel: () => void
+  accountId?: string | null
 }
 
 const messageTypeLabels: Record<ApiBroadcast['messageType'], string> = {
@@ -27,7 +28,7 @@ interface FormState {
   sendNow: boolean
 }
 
-export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFormProps) {
+export default function BroadcastForm({ tags, onSuccess, onCancel, accountId }: BroadcastFormProps) {
   const [form, setForm] = useState<FormState>({
     title: '',
     messageType: 'text',
@@ -66,6 +67,7 @@ export default function BroadcastForm({ tags, onSuccess, onCancel }: BroadcastFo
         scheduledAt: form.sendNow || !form.scheduledAt
           ? null
           : form.scheduledAt + ':00.000+09:00',
+        lineAccountId: accountId ?? null,
       })
       if (res.success) {
         onSuccess()

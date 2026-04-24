@@ -67,8 +67,10 @@ export async function processSegmentSend(
       }
 
       try {
+        console.log(`[segment-send] Multicast batch ${batchIndex + 1}/${totalBatches}: ${lineUserIds.length} users`);
         await lineClient.multicast(lineUserIds, [batchMessage]);
         successCount += batch.length;
+        console.log(`[segment-send] Multicast batch ${batchIndex + 1} OK`);
 
         // Log successfully sent messages
         for (const friend of batch) {
@@ -82,7 +84,8 @@ export async function processSegmentSend(
             .run();
         }
       } catch (err) {
-        console.error(`Segment multicast batch ${batchIndex} failed:`, err);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[segment-send] Multicast batch ${batchIndex + 1}/${totalBatches} failed: ${msg}`);
         // Continue with next batch; failed batch is not logged
       }
     }

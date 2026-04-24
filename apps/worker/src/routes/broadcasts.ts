@@ -5,6 +5,7 @@ import {
   createBroadcast,
   updateBroadcast,
   deleteBroadcast,
+  getLineAccountById,
 } from '@line-crm/db';
 import type { Broadcast as DbBroadcast, BroadcastMessageType, BroadcastTargetType } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
@@ -48,8 +49,9 @@ broadcasts.get('/api/broadcasts', async (c) => {
     }
     return c.json({ success: true, data: items.map(serializeBroadcast) });
   } catch (err) {
-    console.error('GET /api/broadcasts error:', err);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('GET /api/broadcasts error:', message);
+    return c.json({ success: false, error: message }, 500);
   }
 });
 
@@ -191,14 +193,34 @@ broadcasts.post('/api/broadcasts/:id/send', async (c) => {
       return c.json({ success: false, error: 'Broadcast is already sent or sending' }, 400);
     }
 
-    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+    // マルチテナント: broadcastのline_account_idからトークンを解決
+    const broadcastRow = await c.env.DB
+      .prepare(`SELECT line_account_id FROM broadcasts WHERE id = ?`)
+      .bind(id)
+      .first<{ line_account_id: string | null }>();
+
+    let channelAccessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
+    if (broadcastRow?.line_account_id) {
+      const lineAccount = await getLineAccountById(c.env.DB, broadcastRow.line_account_id);
+      if (lineAccount?.channel_access_token) {
+        channelAccessToken = lineAccount.channel_access_token;
+        console.log(`[broadcasts:send] Using account: ${lineAccount.name} (${lineAccount.channel_id})`);
+      } else {
+        console.warn(`[broadcasts:send] line_account_id=${broadcastRow.line_account_id} not found in DB, falling back to env token`);
+      }
+    } else {
+      console.warn(`[broadcasts:send] broadcast.line_account_id is null, using env token`);
+    }
+
+    const lineClient = new LineClient(channelAccessToken);
     await processBroadcastSend(c.env.DB, lineClient, id, c.env.WORKER_URL);
 
     const result = await getBroadcastById(c.env.DB, id);
     return c.json({ success: true, data: result ? serializeBroadcast(result) : null });
   } catch (err) {
     console.error('POST /api/broadcasts/:id/send error:', err);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error: message }, 500);
   }
 });
 
@@ -225,14 +247,34 @@ broadcasts.post('/api/broadcasts/:id/send-segment', async (c) => {
       );
     }
 
-    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+    // マルチテナント: broadcastのline_account_idからトークンを解決
+    const broadcastRow = await c.env.DB
+      .prepare(`SELECT line_account_id FROM broadcasts WHERE id = ?`)
+      .bind(id)
+      .first<{ line_account_id: string | null }>();
+
+    let channelAccessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
+    if (broadcastRow?.line_account_id) {
+      const lineAccount = await getLineAccountById(c.env.DB, broadcastRow.line_account_id);
+      if (lineAccount?.channel_access_token) {
+        channelAccessToken = lineAccount.channel_access_token;
+        console.log(`[broadcasts:send-segment] Using account: ${lineAccount.name} (${lineAccount.channel_id})`);
+      } else {
+        console.warn(`[broadcasts:send-segment] line_account_id=${broadcastRow.line_account_id} not found in DB, falling back to env token`);
+      }
+    } else {
+      console.warn(`[broadcasts:send-segment] broadcast.line_account_id is null, using env token`);
+    }
+
+    const lineClient = new LineClient(channelAccessToken);
     await processSegmentSend(c.env.DB, lineClient, id, body.conditions);
 
     const result = await getBroadcastById(c.env.DB, id);
     return c.json({ success: true, data: result ? serializeBroadcast(result) : null });
   } catch (err) {
     console.error('POST /api/broadcasts/:id/send-segment error:', err);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error: message }, 500);
   }
 });
 

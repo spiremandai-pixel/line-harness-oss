@@ -42,7 +42,14 @@ export async function processBroadcastSend(
   try {
     if (broadcast.target_type === 'all') {
       // Use LINE broadcast API (sends to all followers)
-      await lineClient.broadcast([message]);
+      try {
+        console.log(`[broadcast] Sending broadcast API: broadcastId=${broadcastId}`);
+        await lineClient.broadcast([message]);
+        console.log(`[broadcast] Broadcast API OK: broadcastId=${broadcastId}`);
+      } catch (lineErr) {
+        console.error(`[broadcast] Broadcast API error: broadcastId=${broadcastId}`, lineErr);
+        throw lineErr;
+      }
       // We don't have exact count for broadcast API, set as 0 (unknown)
       totalCount = 0;
       successCount = 0;
@@ -76,8 +83,10 @@ export async function processBroadcastSend(
         }
 
         try {
+          console.log(`[broadcast] Multicast batch ${batchIndex + 1}/${totalBatches}: ${lineUserIds.length} users`);
           await lineClient.multicast(lineUserIds, [batchMessage]);
           successCount += batch.length;
+          console.log(`[broadcast] Multicast batch ${batchIndex + 1} OK`);
 
           // Log only successfully sent messages
           for (const friend of batch) {
@@ -91,7 +100,8 @@ export async function processBroadcastSend(
               .run();
           }
         } catch (err) {
-          console.error(`Multicast batch ${i / MULTICAST_BATCH_SIZE} failed:`, err);
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[broadcast] Multicast batch ${batchIndex + 1}/${totalBatches} failed: ${msg}`);
           // Continue with next batch; failed batch is not logged
         }
       }
