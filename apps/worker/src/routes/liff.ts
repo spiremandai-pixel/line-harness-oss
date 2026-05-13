@@ -314,10 +314,10 @@ liffRoutes.get('/auth/callback', async (c) => {
       });
 
       if (route) {
-        // Auto-tag the friend
-        if (route.tag_id) {
-          await addTagToFriend(db, friend.id, route.tag_id);
-        }
+        // Auto-tag the friend（最大3タグ同時付与）
+        if (route.tag_id)   await addTagToFriend(db, friend.id, route.tag_id);
+        if (route.tag_id_2) await addTagToFriend(db, friend.id, route.tag_id_2);
+        if (route.tag_id_3) await addTagToFriend(db, friend.id, route.tag_id_3);
         // Auto-enroll in scenario (scenario_id stored; enrollment handled by scenario engine)
         // Future: call enrollFriendInScenario(db, friend.id, route.scenario_id) here
       }
@@ -341,6 +341,41 @@ liffRoutes.get('/auth/callback', async (c) => {
         .prepare('UPDATE friends SET metadata = ?, updated_at = ? WHERE id = ?')
         .bind(JSON.stringify(merged), jstNow(), friend.id)
         .run();
+    }
+
+    // 広告クリックID → src タグ自動付与
+    try {
+      if (gclid) {
+        // Google 広告経由: src:ad_google タグを付与（なければ作成）
+        let googleAdTag = await db
+          .prepare(`SELECT id FROM tags WHERE name = 'src:ad_google' LIMIT 1`)
+          .first<{ id: string }>();
+        if (!googleAdTag) {
+          const newId = 'tag-src-ad-google';
+          await db.prepare(`INSERT OR IGNORE INTO tags (id, name, color) VALUES (?, 'src:ad_google', '#4285F4')`)
+            .bind(newId).run();
+          googleAdTag = { id: newId };
+        }
+        await addTagToFriend(db, friend.id, googleAdTag.id);
+        console.log(`[autoTag] src:ad_google 付与 friend=${friend.id}`);
+      }
+
+      if (fbclid) {
+        // Meta 広告経由: src:ad_meta タグを付与（なければ作成）
+        let metaAdTag = await db
+          .prepare(`SELECT id FROM tags WHERE name = 'src:ad_meta' LIMIT 1`)
+          .first<{ id: string }>();
+        if (!metaAdTag) {
+          const newId = 'tag-src-ad-meta';
+          await db.prepare(`INSERT OR IGNORE INTO tags (id, name, color) VALUES (?, 'src:ad_meta', '#1877F2')`)
+            .bind(newId).run();
+          metaAdTag = { id: newId };
+        }
+        await addTagToFriend(db, friend.id, metaAdTag.id);
+        console.log(`[autoTag] src:ad_meta 付与 friend=${friend.id}`);
+      }
+    } catch (err) {
+      console.error('[autoTag] 広告タグ付与失敗:', err);
     }
 
     // Auto-enroll in friend_add scenarios + immediate delivery (skip delivery window)
@@ -566,8 +601,10 @@ liffRoutes.get('/api/analytics/ref-summary', async (c) => {
   try {
     const db = c.env.DB;
     const lineAccountId = c.req.query('lineAccountId');
-    const accountFilter = lineAccountId ? 'AND f.line_account_id = ?' : '';
-    const accountBinds = lineAccountId ? [lineAccountId] : [];
+    // entry_routes: アカウント指定時はそのアカウント所有の経路のみ表示
+    const routeFilter = lineAccountId ? 'WHERE (er.line_account_id = ? OR er.line_account_id IS NULL)' : '';
+    const friendFilter = lineAccountId ? 'AND f.line_account_id = ?' : '';
+    const accountBinds = lineAccountId ? [lineAccountId, lineAccountId] : [];
 
     const rows = await db
       .prepare(
@@ -579,7 +616,8 @@ liffRoutes.get('/api/analytics/ref-summary', async (c) => {
           MAX(rt.created_at) as latest_at
         FROM entry_routes er
         LEFT JOIN ref_tracking rt ON er.ref_code = rt.ref_code
-        LEFT JOIN friends f ON f.id = rt.friend_id ${accountFilter ? `${accountFilter}` : ''}
+        LEFT JOIN friends f ON f.id = rt.friend_id ${friendFilter}
+        ${routeFilter}
         GROUP BY er.ref_code, er.name
         ORDER BY friend_count DESC`,
       )

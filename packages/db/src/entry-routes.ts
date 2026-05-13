@@ -4,8 +4,11 @@ export interface EntryRoute {
   ref_code: string;
   name: string;
   tag_id: string | null;
+  tag_id_2: string | null;
+  tag_id_3: string | null;
   scenario_id: string | null;
   redirect_url: string | null;
+  line_account_id: string | null;
   is_active: number;
   created_at: string;
   updated_at: string;
@@ -24,12 +27,27 @@ export interface CreateEntryRouteInput {
   refCode: string;
   name: string;
   tagId?: string | null;
+  tagId2?: string | null;
+  tagId3?: string | null;
   scenarioId?: string | null;
   redirectUrl?: string | null;
+  lineAccountId?: string | null;
   isActive?: boolean;
 }
 
-export async function getEntryRoutes(db: D1Database): Promise<EntryRoute[]> {
+export async function getEntryRoutes(
+  db: D1Database,
+  lineAccountId?: string | null,
+): Promise<EntryRoute[]> {
+  if (lineAccountId) {
+    const result = await db
+      .prepare(
+        `SELECT * FROM entry_routes WHERE line_account_id = ? OR line_account_id IS NULL ORDER BY created_at DESC`,
+      )
+      .bind(lineAccountId)
+      .all<EntryRoute>();
+    return result.results;
+  }
   const result = await db
     .prepare(`SELECT * FROM entry_routes ORDER BY created_at DESC`)
     .all<EntryRoute>();
@@ -57,16 +75,19 @@ export async function createEntryRoute(
   await db
     .prepare(
       `INSERT INTO entry_routes
-         (id, ref_code, name, tag_id, scenario_id, redirect_url, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, ref_code, name, tag_id, tag_id_2, tag_id_3, scenario_id, redirect_url, line_account_id, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
       input.refCode,
       input.name,
       input.tagId ?? null,
+      input.tagId2 ?? null,
+      input.tagId3 ?? null,
       input.scenarioId ?? null,
       input.redirectUrl ?? null,
+      input.lineAccountId ?? null,
       isActive,
       now,
       now,
@@ -91,6 +112,8 @@ export async function updateEntryRoute(
   if (input.name !== undefined) { fields.push('name = ?'); values.push(input.name); }
   if (input.refCode !== undefined) { fields.push('ref_code = ?'); values.push(input.refCode); }
   if (input.tagId !== undefined) { fields.push('tag_id = ?'); values.push(input.tagId ?? null); }
+  if (input.tagId2 !== undefined) { fields.push('tag_id_2 = ?'); values.push(input.tagId2 ?? null); }
+  if (input.tagId3 !== undefined) { fields.push('tag_id_3 = ?'); values.push(input.tagId3 ?? null); }
   if (input.scenarioId !== undefined) { fields.push('scenario_id = ?'); values.push(input.scenarioId ?? null); }
   if (input.redirectUrl !== undefined) { fields.push('redirect_url = ?'); values.push(input.redirectUrl ?? null); }
   if (input.isActive !== undefined) { fields.push('is_active = ?'); values.push(input.isActive ? 1 : 0); }
