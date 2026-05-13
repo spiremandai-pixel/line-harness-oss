@@ -1,0 +1,20 @@
+-- Migration 029: CV完了メッセージをFlex Messageに変更
+-- ユーザーが「予約完了ボタンを押した = 予約確定の通知」とわかるよう説明を追加
+
+-- 共通（予約完了）
+UPDATE automations
+SET actions    = '[{"type":"add_tag","params":{"tagId":"tag-cv-reserved"}},{"type":"send_message","params":{"messageType":"flex","altText":"✅ ご予約が完了しました","content":"{\"type\":\"bubble\",\"header\":{\"type\":\"box\",\"layout\":\"vertical\",\"contents\":[{\"type\":\"text\",\"text\":\"✅ ご予約が完了しました\",\"weight\":\"bold\",\"size\":\"lg\",\"color\":\"#FFFFFF\"}],\"backgroundColor\":\"#06C755\",\"paddingAll\":\"20px\"},\"body\":{\"type\":\"box\",\"layout\":\"vertical\",\"paddingAll\":\"20px\",\"contents\":[{\"type\":\"text\",\"text\":\"ご予約ありがとうございます！\",\"weight\":\"bold\",\"size\":\"md\",\"color\":\"#1e293b\"},{\"type\":\"text\",\"text\":\"スタッフ一同、ご来店を心よりお待ちしております 🙌\",\"size\":\"sm\",\"color\":\"#475569\",\"wrap\":true,\"margin\":\"md\"},{\"type\":\"separator\",\"margin\":\"xl\"},{\"type\":\"text\",\"text\":\"💡 予約完了ページの「LINEに通知」ボタンをタップいただいたことで、このメッセージが届いています。ご予約内容は予約システムにてご確認ください。\",\"size\":\"xs\",\"color\":\"#64748b\",\"wrap\":true,\"margin\":\"xl\"}]},\"footer\":{\"type\":\"box\",\"layout\":\"vertical\",\"paddingAll\":\"16px\",\"contents\":[{\"type\":\"text\",\"text\":\"ご不明点はこのトークよりお気軽にご連絡ください\",\"size\":\"xs\",\"color\":\"#64748b\",\"align\":\"center\",\"wrap\":true}]}}"}]',
+    updated_at = datetime('now', '+9 hours')
+WHERE id = 'auto-denba-cv-common';
+
+-- 経堂店
+UPDATE automations
+SET actions    = '[{"type":"add_tag","params":{"tagId":"tag-cv-reserved"}},{"type":"add_tag","params":{"tagId":"tag-cv-reserved-kyodo"}},{"type":"send_message","params":{"messageType":"flex","altText":"✅ ご予約が完了しました（経堂店）","content":"{\"type\":\"bubble\",\"header\":{\"type\":\"box\",\"layout\":\"vertical\",\"contents\":[{\"type\":\"text\",\"text\":\"✅ ご予約が完了しました\",\"weight\":\"bold\",\"size\":\"lg\",\"color\":\"#FFFFFF\"}],\"backgroundColor\":\"#06C755\",\"paddingAll\":\"20px\"},\"body\":{\"type\":\"box\",\"layout\":\"vertical\",\"paddingAll\":\"20px\",\"contents\":[{\"type\":\"text\",\"text\":\"ご予約ありがとうございます！\",\"weight\":\"bold\",\"size\":\"md\",\"color\":\"#1e293b\"},{\"type\":\"text\",\"text\":\"経堂店でのご来店をスタッフ一同お待ちしております 🙌\",\"size\":\"sm\",\"color\":\"#475569\",\"wrap\":true,\"margin\":\"md\"},{\"type\":\"separator\",\"margin\":\"xl\"},{\"type\":\"text\",\"text\":\"💡 予約完了ページの「LINEに通知」ボタンをタップいただいたことで、このメッセージが届いています。ご予約内容は予約システムにてご確認ください。\",\"size\":\"xs\",\"color\":\"#64748b\",\"wrap\":true,\"margin\":\"xl\"}]},\"footer\":{\"type\":\"box\",\"layout\":\"vertical\",\"paddingAll\":\"16px\",\"contents\":[{\"type\":\"text\",\"text\":\"ご不明点はこのトークよりお気軽にご連絡ください\",\"size\":\"xs\",\"color\":\"#64748b\",\"align\":\"center\",\"wrap\":true}]}}"}]',
+    updated_at = datetime('now', '+9 hours')
+WHERE id = 'auto-denba-cv-kyodo';
+
+-- 浦和美園店
+UPDATE automations
+SET actions    = '[{"type":"add_tag","params":{"tagId":"tag-cv-reserved"}},{"type":"add_tag","params":{"tagId":"tag-cv-reserved-uraamisono"}},{"type":"send_message","params":{"messageType":"flex","altText":"✅ ご予約が完了しました（浦和美園店）","content":"{\"type\":\"bubble\",\"header\":{\"type\":\"box\",\"layout\":\"vertical\",\"contents\":[{\"type\":\"text\",\"text\":\"✅ ご予約が完了しました\",\"weight\":\"bold\",\"size\":\"lg\",\"color\":\"#FFFFFF\"}],\"backgroundColor\":\"#06C755\",\"paddingAll\":\"20px\"},\"body\":{\"type\":\"box\",\"layout\":\"vertical\",\"paddingAll\":\"20px\",\"contents\":[{\"type\":\"text\",\"text\":\"ご予約ありがとうございます！\",\"weight\":\"bold\",\"size\":\"md\",\"color\":\"#1e293b\"},{\"type\":\"text\",\"text\":\"浦和美園店でのご来店をスタッフ一同お待ちしております 🙌\",\"size\":\"sm\",\"color\":\"#475569\",\"wrap\":true,\"margin\":\"md\"},{\"type\":\"separator\",\"margin\":\"xl\"},{\"type\":\"text\",\"text\":\"💡 予約完了ページの「LINEに通知」ボタンをタップいただいたことで、このメッセージが届いています。ご予約内容は予約システムにてご確認ください。\",\"size\":\"xs\",\"color\":\"#64748b\",\"wrap\":true,\"margin\":\"xl\"}]},\"footer\":{\"type\":\"box\",\"layout\":\"vertical\",\"paddingAll\":\"16px\",\"contents\":[{\"type\":\"text\",\"text\":\"ご不明点はこのトークよりお気軽にご連絡ください\",\"size\":\"xs\",\"color\":\"#64748b\",\"align\":\"center\",\"wrap\":true}]}}"}]',
+    updated_at = datetime('now', '+9 hours')
+WHERE id = 'auto-denba-cv-uraamisono';

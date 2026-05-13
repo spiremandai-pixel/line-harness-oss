@@ -14,10 +14,11 @@ const conversions = new Hono<Env>();
 
 // ── Conversion Points ───────────────────────────────────────────────────────
 
-// GET /api/conversions/points - list all
+// GET /api/conversions/points - list all (filtered by lineAccountId if provided)
 conversions.get('/api/conversions/points', async (c) => {
   try {
-    const items = await getConversionPoints(c.env.DB);
+    const lineAccountId = c.req.query('lineAccountId') || null;
+    const items = await getConversionPoints(c.env.DB, lineAccountId);
     return c.json({
       success: true,
       data: items.map((p) => ({
@@ -25,6 +26,7 @@ conversions.get('/api/conversions/points', async (c) => {
         name: p.name,
         eventType: p.event_type,
         value: p.value,
+        lineAccountId: p.line_account_id,
         createdAt: p.created_at,
       })),
     });
@@ -41,13 +43,19 @@ conversions.post('/api/conversions/points', async (c) => {
       name: string;
       eventType: string;
       value?: number | null;
+      lineAccountId?: string | null;
     }>();
 
     if (!body.name || !body.eventType) {
       return c.json({ success: false, error: 'name and eventType are required' }, 400);
     }
 
-    const point = await createConversionPoint(c.env.DB, body);
+    const point = await createConversionPoint(c.env.DB, {
+      name: body.name,
+      eventType: body.eventType,
+      value: body.value,
+      lineAccountId: body.lineAccountId,
+    });
     return c.json({
       success: true,
       data: {
@@ -155,9 +163,11 @@ conversions.get('/api/conversions/events', async (c) => {
 // GET /api/conversions/report - aggregated report
 conversions.get('/api/conversions/report', async (c) => {
   try {
+    const lineAccountId = c.req.query('lineAccountId') || null;
     const report = await getConversionReport(c.env.DB, {
       startDate: c.req.query('startDate'),
       endDate: c.req.query('endDate'),
+      lineAccountId,
     });
 
     return c.json({ success: true, data: report });

@@ -223,6 +223,10 @@ async function executeAction(
         await lineClient.pushMessage(friend.line_user_id, [
           { type: 'flex', altText: action.params.altText || 'Message', contents },
         ]);
+      } else if (msgType === 'raw') {
+        // Raw LINE message object — supports quickReply, imagemap, etc.
+        const msgObj = JSON.parse(action.params.content);
+        await lineClient.pushMessage(friend.line_user_id, [msgObj]);
       } else {
         // Default: text message
         await lineClient.pushMessage(friend.line_user_id, [
@@ -265,6 +269,21 @@ async function executeAction(
       if (!friend) break;
       const lineClient = new LineClient(lineAccessToken);
       await lineClient.unlinkRichMenuFromUser(friend.line_user_id);
+      break;
+    }
+
+    case 'track_conversion': {
+      // conversion_events に記録（CV計測ページに反映）
+      const conversionPointId = action.params.conversionPointId;
+      if (conversionPointId && friendId) {
+        await db
+          .prepare(
+            `INSERT INTO conversion_events (id, conversion_point_id, friend_id, created_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .bind(crypto.randomUUID(), conversionPointId, friendId, jstNow())
+          .run();
+      }
       break;
     }
 

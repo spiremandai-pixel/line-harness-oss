@@ -8,6 +8,7 @@ export interface ConversionPoint {
   name: string;
   event_type: string;
   value: number | null;
+  line_account_id: string | null;
   created_at: string;
 }
 
@@ -23,7 +24,14 @@ export interface ConversionEvent {
 
 // ── Conversion Points CRUD ──────────────────────────────────────────────────
 
-export async function getConversionPoints(db: D1Database): Promise<ConversionPoint[]> {
+export async function getConversionPoints(db: D1Database, lineAccountId?: string | null): Promise<ConversionPoint[]> {
+  if (lineAccountId) {
+    const result = await db
+      .prepare(`SELECT * FROM conversion_points WHERE line_account_id = ? OR line_account_id IS NULL ORDER BY created_at DESC`)
+      .bind(lineAccountId)
+      .all<ConversionPoint>();
+    return result.results;
+  }
   const result = await db
     .prepare(`SELECT * FROM conversion_points ORDER BY created_at DESC`)
     .all<ConversionPoint>();
@@ -44,6 +52,7 @@ export interface CreateConversionPointInput {
   name: string;
   eventType: string;
   value?: number | null;
+  lineAccountId?: string | null;
 }
 
 export async function createConversionPoint(
@@ -55,10 +64,10 @@ export async function createConversionPoint(
 
   await db
     .prepare(
-      `INSERT INTO conversion_points (id, name, event_type, value, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO conversion_points (id, name, event_type, value, line_account_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .bind(id, input.name, input.eventType, input.value ?? null, now)
+    .bind(id, input.name, input.eventType, input.value ?? null, input.lineAccountId ?? null, now)
     .run();
 
   return (await getConversionPointById(db, id))!;
@@ -171,21 +180,29 @@ export interface ConversionReport {
 
 export async function getConversionReport(
   db: D1Database,
-  opts: { startDate?: string; endDate?: string } = {},
+  opts: { startDate?: string; endDate?: string; lineAccountId?: string | null } = {},
 ): Promise<ConversionReport[]> {
-  const conditions: string[] = [];
+  const joinConditions: string[] = [];
+  const whereConditions: string[] = [];
   const values: unknown[] = [];
 
+  // アカウント絞り込み（WHERE句）
+  if (opts.lineAccountId) {
+    whereConditions.push('(cp.line_account_id = ? OR cp.line_account_id IS NULL)');
+    values.push(opts.lineAccountId);
+  }
+
   if (opts.startDate) {
-    conditions.push('ce.created_at >= ?');
+    joinConditions.push('ce.created_at >= ?');
     values.push(opts.startDate);
   }
   if (opts.endDate) {
-    conditions.push('ce.created_at <= ?');
+    joinConditions.push('ce.created_at <= ?');
     values.push(opts.endDate);
   }
 
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const joinExtra = joinConditions.length > 0 ? ` AND ${joinConditions.join(' AND ')}` : '';
+  const where = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 
   const result = await db
     .prepare(
@@ -196,7 +213,8 @@ export async function getConversionReport(
          COUNT(ce.id) as total_count,
          COALESCE(SUM(cp.value), 0) as total_value
        FROM conversion_points cp
-       LEFT JOIN conversion_events ce ON ce.conversion_point_id = cp.id ${conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : ''}
+       LEFT JOIN conversion_events ce ON ce.conversion_point_id = cp.id${joinExtra}
+       ${where}
        GROUP BY cp.id
        ORDER BY total_count DESC`,
     )

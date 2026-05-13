@@ -231,9 +231,11 @@ export const api = {
       fetchApi<ApiResponse<null>>(`/api/line-accounts/${id}`, { method: 'DELETE' }),
   },
   conversions: {
-    points: () =>
-      fetchApi<ApiResponse<ConversionPoint[]>>('/api/conversions/points'),
-    createPoint: (data: { name: string; eventType: string; value?: number | null }) =>
+    points: (params?: { accountId?: string }) => {
+      const query = params?.accountId ? '?lineAccountId=' + params.accountId : ''
+      return fetchApi<ApiResponse<ConversionPoint[]>>('/api/conversions/points' + query)
+    },
+    createPoint: (data: { name: string; eventType: string; value?: number | null; lineAccountId?: string | null }) =>
       fetchApi<ApiResponse<ConversionPoint>>('/api/conversions/points', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -245,10 +247,16 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    report: (params?: { startDate?: string; endDate?: string }) =>
-      fetchApi<ApiResponse<{ conversionPointId: string; conversionPointName: string; eventType: string; totalCount: number; totalValue: number }[]>>(
-        '/api/conversions/report?' + new URLSearchParams(params as Record<string, string>),
-      ),
+    report: (params?: { startDate?: string; endDate?: string; accountId?: string }) => {
+      const { accountId, ...rest } = params ?? {}
+      const query: Record<string, string> = {}
+      if (rest.startDate) query.startDate = rest.startDate
+      if (rest.endDate) query.endDate = rest.endDate
+      if (accountId) query.lineAccountId = accountId
+      return fetchApi<ApiResponse<{ conversionPointId: string; conversionPointName: string; eventType: string; totalCount: number; totalValue: number }[]>>(
+        '/api/conversions/report?' + new URLSearchParams(query),
+      )
+    },
   },
   affiliates: {
     list: () =>
