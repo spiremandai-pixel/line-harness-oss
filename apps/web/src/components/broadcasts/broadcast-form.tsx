@@ -11,6 +11,7 @@ interface BroadcastFormProps {
   tags: Tag[]
   onSuccess: () => void
   onCancel: () => void
+  accountId?: string | null
 }
 
 const messageTypeLabels: Record<ApiBroadcast['messageType'], string> = {
