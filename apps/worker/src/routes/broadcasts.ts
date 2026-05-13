@@ -40,7 +40,7 @@ broadcasts.get('/api/broadcasts', async (c) => {
     let items: DbBroadcast[];
     if (lineAccountId) {
       const result = await c.env.DB
-        .prepare(`SELECT * FROM broadcasts WHERE line_account_id = ? OR line_account_id IS NULL ORDER BY created_at DESC`)
+        .prepare(`SELECT * FROM broadcasts WHERE line_account_id = ? ORDER BY created_at DESC`)
         .bind(lineAccountId)
         .all<DbBroadcast>();
       items = result.results;
@@ -108,11 +108,9 @@ broadcasts.post('/api/broadcasts', async (c) => {
       scheduledAt: body.scheduledAt ?? null,
     });
 
-    // Save line_account_id if provided
-    if (body.lineAccountId) {
-      await c.env.DB.prepare(`UPDATE broadcasts SET line_account_id = ? WHERE id = ?`)
-        .bind(body.lineAccountId, broadcast.id).run();
-    }
+    // line_account_id を常に保存（null でも明示的にセット）
+    await c.env.DB.prepare(`UPDATE broadcasts SET line_account_id = ? WHERE id = ?`)
+      .bind(body.lineAccountId ?? null, broadcast.id).run();
 
     return c.json({ success: true, data: serializeBroadcast(broadcast) }, 201);
   } catch (err) {
