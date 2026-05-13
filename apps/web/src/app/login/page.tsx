@@ -15,13 +15,33 @@ export default function LoginPage() {
 
     try {
       // Validate by calling a simple endpoint
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8787'
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL
+      if (!apiUrl) {
+        setError('NEXT_PUBLIC_API_URL is not set in build env')
+        setLoading(false)
+        return
+      }
       const res = await fetch(`${apiUrl}/api/friends/count`, {
         headers: { Authorization: `Bearer ${apiKey}` },
       })
 
       if (res.ok) {
         localStorage.setItem('lh_api_key', apiKey)
+        // Fetch staff profile for name/role display
+        try {
+          const profileRes = await fetch(`${apiUrl}/api/staff/me`, {
+            headers: { Authorization: `Bearer ${apiKey}` },
+          })
+          if (profileRes.ok) {
+            const profileData = await profileRes.json()
+            if (profileData.success && profileData.data) {
+              localStorage.setItem('lh_staff_name', profileData.data.name)
+              localStorage.setItem('lh_staff_role', profileData.data.role)
+            }
+          }
+        } catch {
+          // Profile fetch is best-effort
+        }
         router.push('/')
       } else {
         setError('APIキーが正しくありません')
@@ -40,7 +60,7 @@ export default function LoginPage() {
           <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg mx-auto mb-3" style={{ backgroundColor: '#06C755' }}>
             H
           </div>
-          <h1 className="text-xl font-bold text-gray-900">LINE Harness</h1>
+          <h1 className="text-xl font-bold text-gray-900">L Harness</h1>
           <p className="text-sm text-gray-500 mt-1">管理画面にログイン</p>
         </div>
 

@@ -30,13 +30,14 @@ LINE Harness は、LINE公式アカウント向けのオープンソース CRM /
 | Google Calendar | GCal接続、予約管理 |
 | Stripe連携 | 決済イベント連携（テーブル準備済み） |
 | BANモニタリング | アカウントヘルスチェック |
+| スタッフ管理 | owner/admin/staffの3ロール権限制御、APIキー個別発行 |
 
 ## 技術スタック
 
 | レイヤー | 技術 |
 |---------|------|
 | API/Webhook | Cloudflare Workers + Hono |
-| データベース | Cloudflare D1 (SQLite) — 42テーブル |
+| データベース | Cloudflare D1 (SQLite) — 45テーブル |
 | 定期実行 | Workers Cron Triggers (5分毎) |
 | 管理画面 | Next.js 15 (App Router) + Tailwind CSS on CF Pages |
 | LIFF | Vite + vanilla TypeScript |
@@ -48,8 +49,8 @@ LINE Harness は、LINE公式アカウント向けのオープンソース CRM /
 
 | コンポーネント | URL |
 |---------------|-----|
-| API | `https://line-crm-worker.line-crm-api.workers.dev` |
-| 管理画面 | `https://line-crm-admin.pages.dev` |
+| API | `https://your-worker.your-subdomain.workers.dev` |
+| 管理画面 | `https://your-admin.pages.dev` |
 | D1 | `line-crm` (APAC/KIX) |
 
 ## L社 / U社 との比較

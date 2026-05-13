@@ -13,6 +13,21 @@ import { registerGetFormSubmissions } from "./get-form-submissions.js";
 import { registerGetLinkClicks } from "./get-link-clicks.js";
 import { registerAccountSummary } from "./account-summary.js";
 import { registerListCrmObjects } from "./list-crm-objects.js";
+import { registerManageAdPlatforms } from "./manage-ad-platforms.js";
+import { registerGetConversionLogs } from "./get-conversion-logs.js";
+import { registerManageStaff } from "./manage-staff.js";
+import { registerUploadImage } from "./upload-image.js";
+import { registerManageFriends } from "./manage-friends.js";
+import { registerManageScenarios } from "./manage-scenarios.js";
+import { registerManageBroadcasts } from "./manage-broadcasts.js";
+import { registerManageRichMenus } from "./manage-rich-menus.js";
+import { registerManageForms } from "./manage-forms.js";
+import { registerManageTrackedLinks } from "./manage-tracked-links.js";
+import { registerManageAutoReplies } from "./manage-auto-replies.js";
+import { registerManageTrafficPools } from "./manage-traffic-pools.js";
+import { registerManageMessageTemplates } from "./manage-message-templates.js";
+import { registerListConversations } from "./list-conversations.js";
+import { registerGetConversation } from "./get-conversation.js";
 
 export function registerAllTools(server: McpServer): void {
   registerSendMessage(server);
@@ -29,4 +44,19 @@ export function registerAllTools(server: McpServer): void {
   registerGetLinkClicks(server);
   registerAccountSummary(server);
   registerListCrmObjects(server);
+  registerManageAdPlatforms(server);
+  registerGetConversionLogs(server);
+  registerManageStaff(server);
+  registerUploadImage(server);
+  registerManageFriends(server);
+  registerManageScenarios(server);
+  registerManageBroadcasts(server);
+  registerManageRichMenus(server);
+  registerManageForms(server);
+  registerManageTrackedLinks(server);
+  registerManageAutoReplies(server);
+  registerManageTrafficPools(server);
+  registerManageMessageTemplates(server);
+  registerListConversations(server);
+  registerGetConversation(server);
 }

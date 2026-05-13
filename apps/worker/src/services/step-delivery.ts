@@ -1,10 +1,16 @@
+import { extractFlexAltText } from '../utils/flex-alt-text.js';
 import {
   getFriendScenariosDueForDelivery,
   getScenarioSteps,
   advanceFriendScenario,
   completeFriendScenario,
+  claimFriendScenarioForDelivery,
   getFriendById,
   jstNow,
+  computeNextDeliveryAt,
+  resolveStepContent,
+  addTagToFriend,
+  type DeliveryMode,
 } from '@line-crm/db';
 import type { LineClient } from '@line-crm/line-sdk';
 import type { Message } from '@line-crm/line-sdk';
@@ -18,10 +24,11 @@ import { jitterDeliveryTime, addJitter, sleep } from './stealth.js';
  * - {{uid}}                 → friend's user UUID
  * - {{friend_id}}           → friend's internal ID
  * - {{auth_url:CHANNEL_ID}} → full /auth/line URL with uid for cross-account linking
+ * - {{metadata.KEY}}       → friend's metadata value (from form responses etc.)
  */
 export function expandVariables(
   content: string,
-  friend: { id: string; display_name: string | null; user_id: string | null; ref_code?: string | null },
+  friend: { id: string; display_name: string | null; user_id: string | null; ref_code?: string | null; metadata?: Record<string, unknown> | string | null },
   apiOrigin?: string,
 ): string {
   let result = content;
@@ -35,6 +42,26 @@ export function expandVariables(
   } else {
     result = result.replace(/\{\{#if_ref\}\}[\s\S]*?\{\{\/if_ref\}\}/g, '');
   }
+  // Metadata variables: {{metadata.KEY}} → value from friend's metadata
+  const meta = friend.metadata
+    ? (typeof friend.metadata === 'string' ? JSON.parse(friend.metadata) as Record<string, unknown> : friend.metadata)
+    : {};
+  // Conditional block: {{#if_metadata.KEY}}...{{/if_metadata.KEY}} — only shown if metadata key has a value
+  // When inside JSON arrays, removes the element and fixes trailing/leading commas
+  result = result.replace(/\{\{#if_metadata\.([^}]+)\}\}([\s\S]*?)\{\{\/if_metadata\.\1\}\}/g, (_match, key, inner) => {
+    const val = meta[key];
+    if (val == null || val === '') return '';
+    return inner;
+  });
+  // Clean up broken JSON commas from removed conditional blocks (e.g. ",," or "[," or ",]")
+  result = result.replace(/,\s*,/g, ',');
+  result = result.replace(/\[\s*,/g, '[');
+  result = result.replace(/,\s*\]/g, ']');
+  result = result.replace(/\{\{metadata\.([^}]+)\}\}/g, (_match, key) => {
+    const val = meta[key];
+    if (val == null) return '';
+    return Array.isArray(val) ? val.join(', ') : String(val);
+  });
   if (apiOrigin) {
     result = result.replace(/\{\{auth_url:([^}]+)\}\}/g, (_match, channelId) => {
       const params = new URLSearchParams({ account: channelId, ref: 'cross-link' });
@@ -45,47 +72,47 @@ export function expandVariables(
   return result;
 }
 
-/** Default delivery window: 9:00-23:00 JST. If outside, push to next 9:00 AM. */
-const DEFAULT_START_HOUR = 9;
-const DEFAULT_END_HOUR = 23;
-
-function enforceDeliveryWindow(date: Date, preferredHour?: number): Date {
-  // date is already shifted to JST epoch (+9h)
-  const hours = date.getUTCHours();
-  const startHour = preferredHour ?? DEFAULT_START_HOUR;
-  const endHour = DEFAULT_END_HOUR;
-
-  if (hours >= startHour && hours < endHour) return date;
-
-  // Outside window: push to next preferred start hour
-  const result = new Date(date);
-  if (hours >= endHour) {
-    result.setUTCDate(result.getUTCDate() + 1);
+/**
+ * Resolve metadata for a friend, merging across all UUID-linked records.
+ * Falls back to the friend's own metadata if no user_id.
+ */
+export async function resolveMetadata(
+  db: D1Database,
+  friend: { user_id?: string | null; metadata?: string | null },
+): Promise<Record<string, unknown>> {
+  // If friend has a UUID, merge metadata from all linked records
+  if (friend.user_id) {
+    const { getMergedMetadataByUserId } = await import('@line-crm/db');
+    return getMergedMetadataByUserId(db, friend.user_id);
   }
-  result.setUTCHours(startHour, 0, 0, 0);
-  return result;
+  // Fallback: parse own metadata
+  if (friend.metadata) {
+    try { return JSON.parse(friend.metadata); } catch { return {}; }
+  }
+  return {};
 }
+
+const MAX_SENDS_PER_CRON = 40; // CF Free plan: 50 subrequests limit (margin for other jobs)
 
 export async function processStepDeliveries(
   db: D1Database,
   lineClient: LineClient,
   workerUrl?: string,
 ): Promise<void> {
-  // Skip delivery outside 9:00-23:00 JST window
-  const jstHour = new Date(Date.now() + 9 * 60 * 60_000).getUTCHours();
-  if (jstHour < DEFAULT_START_HOUR || jstHour >= DEFAULT_END_HOUR) return;
-
   const now = jstNow();
   const dueFriendScenarios = await getFriendScenariosDueForDelivery(db, now);
 
+  let sendCount = 0;
   for (let i = 0; i < dueFriendScenarios.length; i++) {
+    if (sendCount >= MAX_SENDS_PER_CRON) break;
     const fs = dueFriendScenarios[i];
     try {
       // Stealth: add small random delay between deliveries to avoid burst patterns
       if (i > 0) {
         await sleep(addJitter(50, 200));
       }
-      await processSingleDelivery(db, lineClient, fs, workerUrl);
+      const sent = await processSingleDelivery(db, lineClient, fs, workerUrl);
+      if (sent) sendCount++;
     } catch (err) {
       console.error(`Error processing friend_scenario ${fs.id}:`, err);
       // Continue with next one
@@ -103,24 +130,49 @@ async function processSingleDelivery(
     current_step_order: number;
     status: string;
     next_delivery_at: string | null;
+    started_at: string;
   },
   workerUrl?: string,
-): Promise<void> {
-  // Get friend first to read preferred delivery hour from metadata
+): Promise<boolean> {
+  // Optimistic lock: claim this delivery (prevents duplicate sends from parallel workers)
+  const claimed = await claimFriendScenarioForDelivery(db, fs.id, fs.current_step_order);
+  if (!claimed) return false;
+
   const friend = await getFriendById(db, fs.friend_id);
   if (!friend || !friend.is_following) {
     await completeFriendScenario(db, fs.id);
-    return;
+    return false;
   }
-  const metadata = JSON.parse((friend as { metadata?: string }).metadata || '{}') as Record<string, unknown>;
-  const preferredHour = typeof metadata.preferred_hour === 'number' ? metadata.preferred_hour : undefined;
+
+  // Fetch scenario row for delivery_mode (needed by computeNextDeliveryAt below)
+  const scenarioRow = await db
+    .prepare(`SELECT delivery_mode FROM scenarios WHERE id = ?`)
+    .bind(fs.scenario_id)
+    .first<{ delivery_mode: DeliveryMode }>();
+  if (!scenarioRow) {
+    await completeFriendScenario(db, fs.id);
+    return false;
+  }
 
   // Get all steps for this scenario
   const steps = await getScenarioSteps(db, fs.scenario_id);
   if (steps.length === 0) {
     await completeFriendScenario(db, fs.id);
-    return;
+    return false;
   }
+
+  // computeNextDeliveryAt は「JST clock-time を UTC として表現する Date」前提
+  // (setHours/getDate が JST clock 通りに動くようにオフセット済みの Date)。
+  // fs.started_at は "+09:00" 付き ISO で本物の UTC instant として parse されるため、
+  // +9h ずらして JST clock-time 表現に揃える必要がある。
+  const enrolledAtDate = new Date(new Date(fs.started_at).getTime() + 9 * 60 * 60_000);
+  const nowJstDate = new Date(Date.now() + 9 * 60 * 60_000);
+  const nextDeliveryFor = (step: { delay_minutes: number; offset_days: number | null; offset_minutes: number | null; delivery_time: string | null }): Date =>
+    computeNextDeliveryAt(
+      { delivery_mode: scenarioRow.delivery_mode },
+      step,
+      { enrolledAt: enrolledAtDate, previousDeliveredAt: nowJstDate, now: nowJstDate },
+    );
 
   // Steps are sorted by step_order but may not be contiguous (e.g., 1, 3, 5 after deletions).
   // Find the next step whose step_order > current_step_order.
@@ -128,7 +180,7 @@ async function processSingleDelivery(
 
   if (!currentStep) {
     await completeFriendScenario(db, fs.id);
-    return;
+    return false;
   }
 
   // Check step condition before sending
@@ -138,51 +190,64 @@ async function processSingleDelivery(
       if (currentStep.next_step_on_false !== null && currentStep.next_step_on_false !== undefined) {
         const jumpStep = steps.find((s) => s.step_order === currentStep.next_step_on_false);
         if (jumpStep) {
-          const nextDate = new Date(Date.now() + 9 * 60 * 60_000);
-          nextDate.setMinutes(nextDate.getMinutes() + jumpStep.delay_minutes);
-          const windowedDate = enforceDeliveryWindow(nextDate, preferredHour);
-          const jitteredDate = jitterDeliveryTime(windowedDate);
+          const jitteredDate = jitterDeliveryTime(nextDeliveryFor(jumpStep));
           await advanceFriendScenario(db, fs.id, currentStep.step_order, jitteredDate.toISOString().slice(0, -1) + '+09:00');
-          return;
+          return false;
         }
       }
       const nextIndex = steps.indexOf(currentStep) + 1;
       if (nextIndex < steps.length) {
         const nextStep = steps[nextIndex];
-        const nextDate = new Date(Date.now() + 9 * 60 * 60_000);
-        nextDate.setMinutes(nextDate.getMinutes() + nextStep.delay_minutes);
-        const windowedDate = enforceDeliveryWindow(nextDate, preferredHour);
-        const jitteredDate = jitterDeliveryTime(windowedDate);
+        const jitteredDate = jitterDeliveryTime(nextDeliveryFor(nextStep));
         await advanceFriendScenario(db, fs.id, currentStep.step_order, jitteredDate.toISOString().slice(0, -1) + '+09:00');
       } else {
         await completeFriendScenario(db, fs.id);
       }
-      return;
+      return false;
     }
   }
 
-  // Expand template variables ({{name}}, {{uid}}, {{auth_url:CHANNEL_ID}}, etc.)
-  const expandedContent = expandVariables(currentStep.message_content, friend, workerUrl);
+  // Resolve template_id → templates table (参照型). template_id 未設定なら step 値そのまま。
+  const resolved = await resolveStepContent(db, currentStep);
+
+  // Expand template variables ({{name}}, {{uid}}, {{auth_url:CHANNEL_ID}}, {{metadata.KEY}}, etc.)
+  const resolvedMeta = await resolveMetadata(db, { user_id: (friend as unknown as Record<string, string | null>).user_id, metadata: (friend as unknown as Record<string, string | null>).metadata });
+  const friendWithMeta = { ...friend, metadata: resolvedMeta } as Parameters<typeof expandVariables>[1];
+  const expandedContent = expandVariables(resolved.messageContent, friendWithMeta, workerUrl);
   // Auto-wrap URLs with tracking links (text with URLs → Flex with button)
-  let trackedType: string = currentStep.message_type;
+  let trackedType: string = resolved.messageType;
   let trackedContent = expandedContent;
   if (workerUrl) {
     const { autoTrackContent } = await import('./auto-track.js');
-    const tracked = await autoTrackContent(db, currentStep.message_type, expandedContent, workerUrl);
+    const tracked = await autoTrackContent(db, resolved.messageType, expandedContent, workerUrl);
     trackedType = tracked.messageType;
     trackedContent = tracked.content;
   }
   const message = buildMessage(trackedType, trackedContent);
-  await lineClient.pushMessage(friend.line_user_id, [message]);
+  // Resolve the correct LINE client for this friend's account
+  let deliveryClient = lineClient;
+  const friendAccountId = (friend as unknown as Record<string, string | null>).line_account_id;
+  if (friendAccountId) {
+    const { getLineAccountById } = await import('@line-crm/db');
+    const account = await getLineAccountById(db, friendAccountId);
+    if (account) {
+      const { LineClient: LC } = await import('@line-crm/line-sdk');
+      deliveryClient = new LC(account.channel_access_token);
+    }
+  }
+  await deliveryClient.pushMessage(friend.line_user_id, [message]);
 
-  // Log outgoing message
+  // Log what we actually pushed: variables expanded, URLs auto-tracked, AND
+  // any cleanEmptyNodes() mutation or parse-failure text fallback applied by
+  // buildMessage(). Use scenario_step_id to recover the original template.
   const logId = crypto.randomUUID();
+  const logPayload = messageToLogPayload(message);
   await db
     .prepare(
-      `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, created_at)
-       VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, ?)`,
+      `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, source, template_id_at_send, created_at)
+       VALUES (?, ?, 'outgoing', ?, ?, NULL, ?, 'scenario', ?, ?)`,
     )
-    .bind(logId, friend.id, currentStep.message_type, currentStep.message_content, currentStep.id, jstNow())
+    .bind(logId, friend.id, logPayload.messageType, logPayload.content, currentStep.id, resolved.templateIdAtSend, jstNow())
     .run();
 
   // Determine next step (find the step after currentStep in the sorted list)
@@ -190,16 +255,23 @@ async function processSingleDelivery(
   const nextStep = currentIndex + 1 < steps.length ? steps[currentIndex + 1] : null;
 
   if (nextStep) {
-    // Schedule next delivery with stealth jitter + delivery window enforcement
-    const nextDeliveryDate = new Date(Date.now() + 9 * 60 * 60_000);
-    nextDeliveryDate.setMinutes(nextDeliveryDate.getMinutes() + nextStep.delay_minutes);
-    const windowedDate = enforceDeliveryWindow(nextDeliveryDate, preferredHour);
-    const jitteredDate = jitterDeliveryTime(windowedDate);
+    const jitteredDate = jitterDeliveryTime(nextDeliveryFor(nextStep));
     await advanceFriendScenario(db, fs.id, currentStep.step_order, jitteredDate.toISOString().slice(0, -1) + '+09:00');
   } else {
     // This was the last step
     await completeFriendScenario(db, fs.id);
   }
+
+  // 到達タグ付与 (advance / complete の後 = 再送が起きてもタグ付与は影響しない順序)
+  // 失敗してもログに残すだけで配信フローは止めない。
+  if (currentStep.on_reach_tag_id) {
+    try {
+      await addTagToFriend(db, friend.id, currentStep.on_reach_tag_id);
+    } catch (err) {
+      console.error(`[scenario] tag attach failed step=${currentStep.id}:`, err);
+    }
+  }
+  return true;
 }
 
 async function evaluateCondition(
@@ -247,29 +319,8 @@ async function evaluateCondition(
   }
 }
 
-/** Recursively find the first text element in a Flex Message for altText */
-function extractFlexAltText(obj: unknown, depth = 0): string | null {
-  if (depth > 10 || !obj || typeof obj !== 'object') return null;
-  const node = obj as Record<string, unknown>;
-  if (node.type === 'text' && typeof node.text === 'string') {
-    return node.text.slice(0, 100);
-  }
-  if (Array.isArray(node.contents)) {
-    for (const child of node.contents) {
-      const found = extractFlexAltText(child, depth + 1);
-      if (found) return found;
-    }
-  }
-  for (const key of ['header', 'body', 'footer']) {
-    if (node[key]) {
-      const found = extractFlexAltText(node[key], depth + 1);
-      if (found) return found;
-    }
-  }
-  return null;
-}
 
-/** Remove empty text nodes from Flex JSON (caused by conditional blocks) */
+/** Remove empty text nodes and boxes with empty text from Flex JSON */
 function cleanEmptyNodes(obj: unknown): void {
   if (!obj || typeof obj !== 'object') return;
   const node = obj as Record<string, unknown>;
@@ -277,18 +328,53 @@ function cleanEmptyNodes(obj: unknown): void {
     if (node[key]) cleanEmptyNodes(node[key]);
   }
   if (Array.isArray(node.contents)) {
+    // First clean children recursively
+    for (const c of node.contents as unknown[]) cleanEmptyNodes(c);
+    // Then filter out empty nodes
     node.contents = (node.contents as unknown[]).filter((c) => {
-      if (c && typeof c === 'object' && (c as Record<string, unknown>).type === 'text') {
-        const text = (c as Record<string, unknown>).text;
+      if (!c || typeof c !== 'object') return true;
+      const child = c as Record<string, unknown>;
+      // Remove empty text nodes
+      if (child.type === 'text') {
+        const text = child.text;
         return typeof text === 'string' && text.trim().length > 0;
+      }
+      // Remove box nodes where any text child is empty (metadata rows with no value)
+      if (child.type === 'box' && Array.isArray(child.contents)) {
+        const texts = (child.contents as Array<Record<string, unknown>>).filter(t => t.type === 'text');
+        if (texts.length >= 2) {
+          // horizontal box with label + value — remove if value is empty
+          const hasEmptyText = texts.some(t => typeof t.text === 'string' && t.text.trim() === '');
+          if (hasEmptyText) return false;
+        }
       }
       return true;
     });
-    for (const c of node.contents as unknown[]) cleanEmptyNodes(c);
   }
 }
 
-export function buildMessage(messageType: string, messageContent: string): Message {
+/**
+ * Derive (messageType, content) from a built `Message` object so that what
+ * lands in messages_log mirrors what was actually pushed to LINE — including
+ * cleanEmptyNodes() mutations and any parse-failure text fallback inside
+ * buildMessage(). Use this whenever you log a message you just pushed.
+ */
+export function messageToLogPayload(message: Message): { messageType: string; content: string } {
+  if (message.type === 'text') return { messageType: 'text', content: message.text };
+  if (message.type === 'flex') return { messageType: 'flex', content: JSON.stringify(message.contents) };
+  if (message.type === 'image') {
+    return {
+      messageType: 'image',
+      content: JSON.stringify({
+        originalContentUrl: message.originalContentUrl,
+        previewImageUrl: message.previewImageUrl,
+      }),
+    };
+  }
+  return { messageType: message.type, content: JSON.stringify(message) };
+}
+
+export function buildMessage(messageType: string, messageContent: string, altText?: string): Message {
   if (messageType === 'text') {
     return { type: 'text', text: messageContent };
   }
@@ -317,8 +403,7 @@ export function buildMessage(messageType: string, messageContent: string): Messa
       // Remove empty text nodes (from {{#if_ref}} conditional blocks)
       cleanEmptyNodes(contents);
       // Extract first text element for altText (shown in notifications)
-      const altText = extractFlexAltText(contents) || 'お知らせ';
-      return { type: 'flex', altText, contents };
+      return { type: 'flex', altText: altText || extractFlexAltText(contents), contents };
     } catch {
       return { type: 'text', text: messageContent };
     }

@@ -10,6 +10,11 @@ export { BroadcastsResource } from './resources/broadcasts.js'
 export { RichMenusResource } from './resources/rich-menus.js'
 export { TrackedLinksResource } from './resources/tracked-links.js'
 export { FormsResource } from './resources/forms.js'
+export { AdPlatformsResource } from './resources/ad-platforms.js'
+export { StaffResource } from './resources/staff.js'
+export { ImagesResource } from './resources/images.js'
+export { AutoRepliesResource } from './resources/auto-replies.js'
+export { ConversationsResource } from './resources/conversations.js'
 
 // All types
 export type {
@@ -52,4 +57,28 @@ export type {
   CreateFormInput,
   UpdateFormInput,
   FormSubmission,
+  StaffRole,
+  StaffMember,
+  StaffProfile,
+  CreateStaffInput,
+  UpdateStaffInput,
+  UploadedImage,
+  UploadImageInput,
+  AutoReply,
+  CreateAutoReplyInput,
+  UpdateAutoReplyInput,
+  MessageSource,
+  ConversationSummary,
+  ConversationListParams,
+  ConversationListResponse,
+  ConversationMessage,
+  ConversationDetail,
+  GetConversationParams,
 } from './types.js'
+
+export type {
+  AdPlatform,
+  AdConversionLog,
+  CreateAdPlatformInput,
+  UpdateAdPlatformInput,
+} from './resources/ad-platforms.js'

@@ -1,3 +1,5 @@
+import { extractFlexAltText } from '../utils/flex-alt-text.js';
+
 /**
  * イベントバス — システム内イベントの発火と処理
  *
@@ -5,7 +7,6 @@
  * 1. アクティブな送信Webhookへ通知
  * 2. スコアリングルール適用
  * 3. 自動化ルール(IF-THEN)実行
- * 4. 通知ルール処理
  */
 
 import {
@@ -13,22 +14,32 @@ import {
   applyScoring,
   getActiveAutomationsByEvent,
   createAutomationLog,
-  getActiveNotificationRulesByEvent,
-  createNotification,
   addTagToFriend,
   removeTagFromFriend,
   enrollFriendInScenario,
   jstNow,
+  getFriendScore,
 } from '@line-crm/db';
 import { LineClient } from '@line-crm/line-sdk';
+import type { Message } from '@line-crm/line-sdk';
+import { sendAdConversions } from './ad-conversion.js';
 
-interface EventPayload {
+export interface EventPayload {
   friendId?: string;
   eventData?: Record<string, unknown>;
+  conversionEventName?: string;
+  conversionValue?: number;
+  replyToken?: string;
 }
 
 /**
- * イベントを発火し、登録された全ハンドラーを実行
+ * Fire an event and run all registered handlers.
+ *
+ * Execution is split into two sequential phases so that score_threshold
+ * conditions in automation rules see the score already updated by this event:
+ *
+ *   Phase 1 (concurrent): outgoing webhooks + scoring
+ *   Phase 2 (concurrent): automations + notifications, with currentScore injected
  */
 export async function fireEvent(
   db: D1Database,
@@ -37,12 +48,31 @@ export async function fireEvent(
   lineAccessToken?: string,
   lineAccountId?: string | null,
 ): Promise<void> {
-  await Promise.allSettled([
+  // Phase 1: fire webhooks, apply scoring rules, and ad conversion postback concurrently.
+  const phase1: Promise<unknown>[] = [
     fireOutgoingWebhooks(db, eventType, payload),
     processScoring(db, eventType, payload),
-    processAutomations(db, eventType, payload, lineAccessToken, lineAccountId),
-    processNotifications(db, eventType, payload, lineAccountId),
-  ]);
+  ];
+  if (payload.friendId && payload.conversionEventName) {
+    phase1.push(
+      sendAdConversions(db, payload.friendId, payload.conversionEventName, payload.conversionValue),
+    );
+  }
+  await Promise.allSettled(phase1);
+
+  // Build an enriched payload with the freshly-updated score.
+  const enrichedPayload: EventPayload = payload.friendId
+    ? {
+        ...payload,
+        eventData: {
+          ...payload.eventData,
+          currentScore: await getFriendScore(db, payload.friendId),
+        },
+      }
+    : payload;
+
+  // Phase 2: evaluate automations.
+  await processAutomations(db, eventType, enrichedPayload, lineAccessToken, lineAccountId);
 }
 
 /** 送信Webhookへの通知 */
@@ -130,7 +160,7 @@ async function processAutomations(
 
       for (const action of actions) {
         try {
-          await executeAction(db, action, payload, lineAccessToken);
+          await executeAction(db, action, payload, lineAccessToken, lineAccountId);
           results.push({ action: action.type, success: true });
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
@@ -181,6 +211,14 @@ function matchConditions(
     if (!text || !text.includes(conditions.keyword as string)) return false;
   }
 
+  // keyword_exact（完全一致）
+  if (conditions.keyword_exact) {
+    const text = (payload.eventData?.text || '').trim();
+    if (text !== conditions.keyword_exact) {
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -190,6 +228,7 @@ async function executeAction(
   action: { type: string; params: Record<string, string> },
   payload: EventPayload,
   lineAccessToken?: string,
+  lineAccountId?: string | null,
 ): Promise<void> {
   const friendId = payload.friendId;
   if (!friendId && action.type !== 'send_webhook') {
@@ -217,22 +256,77 @@ async function executeAction(
         .first<{ line_user_id: string }>();
       if (!friend) break;
       const lineClient = new LineClient(lineAccessToken);
-      const msgType = action.params.messageType || 'text';
-      if (msgType === 'flex') {
-        const contents = JSON.parse(action.params.content);
-        await lineClient.pushMessage(friend.line_user_id, [
-          { type: 'flex', altText: action.params.altText || 'Message', contents },
-        ]);
-      } else if (msgType === 'raw') {
-        // Raw LINE message object — supports quickReply, imagemap, etc.
-        const msgObj = JSON.parse(action.params.content);
-        await lineClient.pushMessage(friend.line_user_id, [msgObj]);
-      } else {
-        // Default: text message
-        await lineClient.pushMessage(friend.line_user_id, [
-          { type: 'text', text: action.params.content },
-        ]);
+
+      // template_id が set なら templates から content/type を resolve、
+      // なければ inline params を使う。template が見つからない (削除済 等) は
+      // inline fallback (content が空なら下流の JSON.parse が throw → automation
+      // 全体は partial 扱い)。
+      let resolvedType = action.params.messageType || 'text';
+      let resolvedContent = action.params.content ?? '';
+      const tplId = action.params.template_id;
+      if (tplId) {
+        const { getTemplateById } = await import('@line-crm/db');
+        const tpl = await getTemplateById(db, tplId);
+        if (tpl) {
+          resolvedType = tpl.message_type;
+          resolvedContent = tpl.message_content;
+        }
       }
+
+      let msg: Message;
+      let logContent: string;
+      if (resolvedType === 'flex') {
+        const contents = JSON.parse(resolvedContent);
+        msg = { type: 'flex', altText: action.params.altText || extractFlexAltText(contents), contents };
+        logContent = JSON.stringify(contents);
+      } else if (resolvedType === 'image') {
+        // template に "originalContentUrl" / "previewImageUrl" を持つ JSON が入る前提。
+        // parse 失敗時は text fallback ではなく throw → automation 側で partial 扱いにする。
+        const parsed = JSON.parse(resolvedContent) as { originalContentUrl: string; previewImageUrl: string };
+        msg = {
+          type: 'image',
+          originalContentUrl: parsed.originalContentUrl,
+          previewImageUrl: parsed.previewImageUrl,
+        };
+        logContent = JSON.stringify(parsed);
+      } else {
+        msg = { type: 'text', text: resolvedContent };
+        logContent = resolvedContent;
+      }
+
+      let deliveryType: 'reply' | 'push';
+      if (payload.replyToken) {
+        try {
+          await lineClient.replyMessage(payload.replyToken, [msg]);
+          payload.replyToken = undefined;
+          deliveryType = 'reply';
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          const isTokenError = errMsg.includes('400') || errMsg.includes('Invalid reply token');
+          if (isTokenError) {
+            await lineClient.pushMessage(friend.line_user_id, [msg]);
+            deliveryType = 'push';
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        await lineClient.pushMessage(friend.line_user_id, [msg]);
+        deliveryType = 'push';
+      }
+
+      // log は実際に送信した msg の type を反映する。msgType が 'image' 等で
+      // else 経路に入った場合、actual message は text なので 'text' で記録すべき。
+      // params の messageType をそのまま使うと admin 側で画像/Flex プレースホルダ
+      // が出てしまう。
+      await logOutgoingMessage(db, {
+        friendId,
+        messageType: msg.type,
+        content: logContent,
+        deliveryType,
+        source: 'automation',
+        lineAccountId,
+      });
       break;
     }
 
@@ -294,7 +388,19 @@ async function executeAction(
         .bind(friendId)
         .first<{ metadata: string }>();
       const current = JSON.parse(existing?.metadata || '{}') as Record<string, unknown>;
-      const patch = JSON.parse(action.params.data || '{}') as Record<string, unknown>;
+      // {{message}} を受信メッセージ内容に置換してからパース
+      // JSON文字列内に埋め込むため、JSON仕様に準拠して全制御文字をエスケープ
+      const escapeForJsonString = (s: string): string =>
+        s
+          .replace(/\\/g, '\\\\')
+          .replace(/"/g, '\\"')
+          .replace(/\n/g, '\\n')
+          .replace(/\r/g, '\\r')
+          .replace(/\t/g, '\\t')
+          .replace(/[\u0000-\u001f]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+      const raw = (action.params.data || '{}')
+        .replace(/\{\{message\}\}/g, escapeForJsonString(payload.eventData?.text || ''));
+      const patch = JSON.parse(raw) as Record<string, unknown>;
       const merged = { ...current, ...patch };
       await db
         .prepare('UPDATE friends SET metadata = ?, updated_at = ? WHERE id = ?')
@@ -308,43 +414,36 @@ async function executeAction(
   }
 }
 
-/** 通知ルール処理 */
-async function processNotifications(
+/** 送信メッセージを messages_log に記録（失敗しても例外を上げない） */
+async function logOutgoingMessage(
   db: D1Database,
-  eventType: string,
-  payload: EventPayload,
-  lineAccountId?: string | null,
+  params: {
+    friendId: string;
+    messageType: string;
+    content: string;
+    deliveryType: 'reply' | 'push';
+    source: string;
+    lineAccountId?: string | null;
+  },
 ): Promise<void> {
   try {
-    const allRules = await getActiveNotificationRulesByEvent(db, eventType);
-    const rules = allRules.filter(
-      (r) => !r.line_account_id || !lineAccountId || r.line_account_id === lineAccountId,
-    );
-
-    for (const rule of rules) {
-      let channels: string[] = JSON.parse(rule.channels);
-      // Guard against double-encoded JSON strings (e.g. "\"[\\\"webhook\\\"]\"")
-      if (typeof channels === 'string') channels = JSON.parse(channels);
-
-      for (const channel of channels) {
-        await createNotification(db, {
-          ruleId: rule.id,
-          eventType,
-          title: `${rule.name}: ${eventType}`,
-          body: JSON.stringify(payload),
-          channel,
-          metadata: JSON.stringify(payload.eventData ?? {}),
-        });
-
-        // Webhook通知チャネルの場合は即時配信
-        if (channel === 'webhook') {
-          // 送信Webhookと統合（既にfireOutgoingWebhooksで処理済み）
-        }
-        // email チャネルの場合はSendGrid等で送信（将来実装）
-        // dashboard チャネルの場合はDB記録のみ（上記createNotificationで完了）
-      }
-    }
+    await db
+      .prepare(
+        `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
+         VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        params.friendId,
+        params.messageType,
+        params.content,
+        params.deliveryType,
+        params.source,
+        params.lineAccountId ?? null,
+        jstNow(),
+      )
+      .run();
   } catch (err) {
-    console.error('processNotifications error:', err);
+    console.error('logOutgoingMessage failed:', err);
   }
 }
