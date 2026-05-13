@@ -321,11 +321,57 @@ async function handleEvent(
 
     // チャットを作成/更新（ユーザーの自発的メッセージのみ unread にする）
     // ボタンタップ等の自動応答キーワードは除外
-    const autoKeywords = ['料金', '機能', 'API', 'フォーム', 'ヘルプ', 'UUID', 'UUID連携について教えて', 'UUID連携を確認', '配信時間', '導入支援を希望します', 'アカウント連携を見る', '体験を完了する', 'BAN対策を見る', '連携確認'];
+    const autoKeywords = ['料金', '機能', 'API', 'フォーム', 'ヘルプ', 'UUID', 'UUID連携について教えて', 'UUID連携を確認', '配信時間', '導入支援を希望します', 'アカウント連携を見る', '体験を完了する', 'BAN対策を見る', '連携確認', '予約完了 経堂店', '予約完了 浦和美園店'];
     const isAutoKeyword = autoKeywords.some(k => incomingText === k);
     const isTimeCommand = /(?:配信時間|配信|届けて|通知)[はを]?\s*\d{1,2}\s*時/.test(incomingText);
     if (!isAutoKeyword && !isTimeCommand) {
       await upsertChatOnMessage(db, friend.id);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // 電話番号検出: ユーザーが電話番号を送信した場合、メタデータに保存して CV 照合に利用
+    // 対応フォーマット: 090-1234-5678 / 09012345678 / 0120-000-000 など
+    // ────────────────────────────────────────────────────────────
+    const phoneMatch = incomingText.trim().match(
+      /^(0[789]0[-\s]?\d{4}[-\s]?\d{4}|0\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4})$/,
+    );
+    if (phoneMatch) {
+      const phone = incomingText.trim().replace(/[-\s]/g, ''); // 正規化（ハイフン・空白除去）
+      try {
+        const existingMeta = await db
+          .prepare('SELECT metadata FROM friends WHERE id = ?')
+          .bind(friend.id)
+          .first<{ metadata: string }>();
+        const meta = JSON.parse(existingMeta?.metadata || '{}') as Record<string, unknown>;
+
+        if (!meta.phone) {
+          // 新規登録
+          meta.phone = phone;
+          await db
+            .prepare('UPDATE friends SET metadata = ?, updated_at = ? WHERE id = ?')
+            .bind(JSON.stringify(meta), jstNow(), friend.id)
+            .run();
+
+          // has:phone タグを付与（存在しない場合はスキップ）
+          const { addTagToFriend } = await import('@line-crm/db');
+          try { await addTagToFriend(db, friend.id, 'tag-has-phone'); } catch { /* ignore */ }
+
+          // 登録完了メッセージを返信
+          await lineClient.replyMessage(event.replyToken, [{
+            type: 'text',
+            text: `電話番号を登録しました 📞\n\nご予約が完了した際に自動でお知らせします。`,
+          }]);
+        } else {
+          // 既に登録済み
+          await lineClient.replyMessage(event.replyToken, [{
+            type: 'text',
+            text: `お電話番号はすでに登録済みです。\n（登録番号: ${String(meta.phone).replace(/(\d{3})(\d{4})(\d{4})/, '$1-$2-$3')}）`,
+          }]);
+        }
+      } catch (err) {
+        console.error('Phone registration error:', err);
+      }
+      return;
     }
 
     // 配信時間設定: 「配信時間は○時」「○時に届けて」等のパターンを検出

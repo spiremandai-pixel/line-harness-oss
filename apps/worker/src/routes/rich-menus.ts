@@ -5,10 +5,24 @@ import type { Env } from '../index.js';
 
 const richMenus = new Hono<Env>();
 
+/** lineAccountId クエリパラメータがあればDBからトークンを取得、なければenvのデフォルトを使用 */
+async function resolveToken(c: { env: Env['Bindings']; req: { query: (k: string) => string | undefined } }): Promise<string> {
+  const lineAccountId = c.req.query('lineAccountId');
+  if (lineAccountId) {
+    const row = await c.env.DB
+      .prepare('SELECT channel_access_token FROM line_accounts WHERE id = ? AND is_active = 1')
+      .bind(lineAccountId)
+      .first<{ channel_access_token: string }>();
+    if (row) return row.channel_access_token;
+  }
+  return c.env.LINE_CHANNEL_ACCESS_TOKEN;
+}
+
 // GET /api/rich-menus — list all rich menus from LINE API
 richMenus.get('/api/rich-menus', async (c) => {
   try {
-    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+    const token = await resolveToken(c as Parameters<typeof resolveToken>[0]);
+    const lineClient = new LineClient(token);
     const result = await lineClient.getRichMenuList();
     return c.json({ success: true, data: result.richmenus ?? [] });
   } catch (err) {
@@ -22,7 +36,8 @@ richMenus.get('/api/rich-menus', async (c) => {
 richMenus.post('/api/rich-menus', async (c) => {
   try {
     const body = await c.req.json();
-    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+    const token = await resolveToken(c as Parameters<typeof resolveToken>[0]);
+    const lineClient = new LineClient(token);
     const result = await lineClient.createRichMenu(body);
     return c.json({ success: true, data: result }, 201);
   } catch (err) {
@@ -36,7 +51,8 @@ richMenus.post('/api/rich-menus', async (c) => {
 richMenus.delete('/api/rich-menus/:id', async (c) => {
   try {
     const richMenuId = c.req.param('id');
-    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+    const token = await resolveToken(c as Parameters<typeof resolveToken>[0]);
+    const lineClient = new LineClient(token);
     await lineClient.deleteRichMenu(richMenuId);
     return c.json({ success: true, data: null });
   } catch (err) {
@@ -50,7 +66,8 @@ richMenus.delete('/api/rich-menus/:id', async (c) => {
 richMenus.post('/api/rich-menus/:id/default', async (c) => {
   try {
     const richMenuId = c.req.param('id');
-    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+    const token = await resolveToken(c as Parameters<typeof resolveToken>[0]);
+    const lineClient = new LineClient(token);
     await lineClient.setDefaultRichMenu(richMenuId);
     return c.json({ success: true, data: null });
   } catch (err) {
@@ -121,12 +138,10 @@ richMenus.post('/api/rich-menus/:id/image', async (c) => {
     let imageContentType: 'image/png' | 'image/jpeg' = 'image/png';
 
     if (contentType.includes('application/json')) {
-      // Accept base64 encoded image in JSON body
-      const body = await c.req.json<{ image: string; contentType?: string }>();
+      const body = await c.req.json<{ image: string; contentType?: string; lineAccountId?: string }>();
       if (!body.image) {
         return c.json({ success: false, error: 'image (base64) is required' }, 400);
       }
-      // Strip data URI prefix if present
       const base64 = body.image.replace(/^data:image\/\w+;base64,/, '');
       const binaryString = atob(base64);
       const bytes = new Uint8Array(binaryString.length);
@@ -136,14 +151,14 @@ richMenus.post('/api/rich-menus/:id/image', async (c) => {
       imageData = bytes.buffer;
       if (body.contentType === 'image/jpeg') imageContentType = 'image/jpeg';
     } else if (contentType.includes('image/')) {
-      // Accept raw binary upload
       imageData = await c.req.arrayBuffer();
       imageContentType = contentType.includes('jpeg') || contentType.includes('jpg') ? 'image/jpeg' : 'image/png';
     } else {
       return c.json({ success: false, error: 'Content-Type must be application/json (with base64) or image/png or image/jpeg' }, 400);
     }
 
-    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+    const token = await resolveToken(c as Parameters<typeof resolveToken>[0]);
+    const lineClient = new LineClient(token);
     await lineClient.uploadRichMenuImage(richMenuId, imageData, imageContentType);
 
     return c.json({ success: true, data: null });

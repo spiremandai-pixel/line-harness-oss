@@ -8,7 +8,7 @@ account_id = "2b2c391740bde4e16640a22541e29e3a"
 # Do NOT hardcode secrets here
 
 [vars]
-WORKER_URL = "https://line-crm-worker.line-crm-api.workers.dev"
+WORKER_URL = "https://line-crm-worker.spire-solution.workers.dev"
 
 [[d1_databases]]
 binding = "DB"
@@ -16,4 +16,9 @@ database_name = "line-crm"
 database_id = "bb264575-e44c-4193-9609-c095d873785e"
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "0 2 * * *"]
+
+# NOTE: R2 bucket binding - enable after running `wrangler r2 bucket create line-crm-assets`
+# [[r2_buckets]]
+# binding = "ASSETS"
+# bucket_name = "line-crm-assets"

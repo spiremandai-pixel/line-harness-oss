@@ -10,6 +10,7 @@ import {
   createChat,
   updateChat,
   jstNow,
+  getLineAccountById,
 } from '@line-crm/db';
 import type { Env } from '../index.js';
 
@@ -225,22 +226,43 @@ chats.post('/api/chats/:id/send', async (c) => {
     const friend = await c.env.DB
       .prepare(`SELECT * FROM friends WHERE id = ?`)
       .bind(chat.friend_id)
-      .first<{ id: string; line_user_id: string }>();
+      .first<{ id: string; line_user_id: string; line_account_id: string | null }>();
     if (!friend) return c.json({ success: false, error: 'Friend not found' }, 404);
+
+    // マルチテナント: friendのline_account_idからトークンを解決
+    let channelAccessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
+    if (friend.line_account_id) {
+      const lineAccount = await getLineAccountById(c.env.DB, friend.line_account_id);
+      if (lineAccount?.channel_access_token) {
+        channelAccessToken = lineAccount.channel_access_token;
+        console.log(`[send] Using account: ${lineAccount.name} (${lineAccount.channel_id})`);
+      } else {
+        console.warn(`[send] line_account_id=${friend.line_account_id} not found, falling back to env token`);
+      }
+    } else {
+      console.warn(`[send] friend.line_account_id is null, using env token`);
+    }
 
     // LINE APIでメッセージ送信
     const { LineClient } = await import('@line-crm/line-sdk');
-    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+    const lineClient = new LineClient(channelAccessToken);
     const messageType = body.messageType ?? 'text';
 
-    if (messageType === 'text') {
-      await lineClient.pushTextMessage(friend.line_user_id, body.content);
-    } else if (messageType === 'flex') {
-      const contents = JSON.parse(body.content);
-      await lineClient.pushFlexMessage(friend.line_user_id, 'Message', contents);
+    try {
+      if (messageType === 'text') {
+        await lineClient.pushTextMessage(friend.line_user_id, body.content);
+      } else if (messageType === 'flex') {
+        const contents = JSON.parse(body.content);
+        await lineClient.pushFlexMessage(friend.line_user_id, 'Message', contents);
+      }
+      console.log(`[send] LINE push OK: to=${friend.line_user_id} type=${messageType}`);
+    } catch (lineErr) {
+      console.error(`[send] LINE API error: to=${friend.line_user_id}`, lineErr);
+      const message = lineErr instanceof Error ? lineErr.message : String(lineErr);
+      return c.json({ success: false, error: `LINE API error: ${message}` }, 502);
     }
 
-    // メッセージログに記録
+    // LINE送信成功後にメッセージログへ記録
     const logId = crypto.randomUUID();
     await c.env.DB
       .prepare(`INSERT INTO messages_log (id, friend_id, direction, message_type, content, created_at) VALUES (?, ?, 'outgoing', ?, ?, ?)`)

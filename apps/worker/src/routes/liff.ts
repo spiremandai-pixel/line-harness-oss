@@ -55,21 +55,7 @@ liffRoutes.get('/auth/line', async (c) => {
   }
   const callbackUrl = `${baseUrl}/auth/callback`;
 
-  // Build LIFF URL with ref + ad params (for mobile → LINE app)
-  // Extract LIFF ID from URL and pass as query param so the app can init correctly
-  const liffIdMatch = liffUrl.match(/liff\.line\.me\/([0-9]+-[A-Za-z0-9]+)/);
-  const liffParams = new URLSearchParams();
-  if (liffIdMatch) liffParams.set('liffId', liffIdMatch[1]);
-  if (ref) liffParams.set('ref', ref);
-  if (redirect) liffParams.set('redirect', redirect);
-  if (gclid) liffParams.set('gclid', gclid);
-  if (fbclid) liffParams.set('fbclid', fbclid);
-  if (utmSource) liffParams.set('utm_source', utmSource);
-  const liffTarget = liffParams.toString()
-    ? `${liffUrl}?${liffParams.toString()}`
-    : liffUrl;
-
-  // Build OAuth URL (for desktop fallback)
+  // Build OAuth URL — works on both mobile and desktop
   // Pack all tracking params into state so they survive the OAuth redirect
   const state = JSON.stringify({ ref, redirect, gclid, fbclid, utmSource, utmMedium, utmCampaign, account: accountParam, uid: uidParam });
   const encodedState = btoa(state);
@@ -81,27 +67,44 @@ liffRoutes.get('/auth/line', async (c) => {
   loginUrl.searchParams.set('bot_prompt', 'aggressive');
   loginUrl.searchParams.set('state', encodedState);
 
-  // Build LIFF URL with params (opens LINE app directly on mobile + QR on PC)
+  // LIFF URL（設定されている場合のみ使用）
+  const liffIdMatch = liffUrl ? liffUrl.match(/liff\.line\.me\/([0-9]+-[A-Za-z0-9]+)/) : null;
+  const liffParams = new URLSearchParams();
+  if (liffIdMatch) liffParams.set('liffId', liffIdMatch[1]);
+  if (ref) liffParams.set('ref', ref);
+  if (redirect) liffParams.set('redirect', redirect);
+  if (gclid) liffParams.set('gclid', gclid);
+  if (fbclid) liffParams.set('fbclid', fbclid);
+  if (utmSource) liffParams.set('utm_source', utmSource);
+  const liffTarget = liffUrl
+    ? (liffParams.toString() ? `${liffUrl}?${liffParams.toString()}` : liffUrl)
+    : null;
+
   const qrParams = new URLSearchParams();
   if (ref) qrParams.set('ref', ref);
   if (uidParam) qrParams.set('uid', uidParam);
   if (accountParam) qrParams.set('account', accountParam);
-  const qrUrl = qrParams.toString() ? `${liffUrl}?${qrParams.toString()}` : liffUrl;
+  const qrUrl = liffUrl
+    ? (qrParams.toString() ? `${liffUrl}?${qrParams.toString()}` : liffUrl)
+    : loginUrl.toString();
 
-  // Mobile: redirect to LIFF URL (opens LINE app directly)
-  // Exception: cross-account links (account param) use OAuth directly
-  // because Account A's LIFF can't open from Account B's LINE chat
+  // Mobile: LIFFが設定されていればLIFF、なければOAuth直接
   const ua = (c.req.header('user-agent') || '').toLowerCase();
   const isMobile = /iphone|ipad|android|mobile/.test(ua);
   if (isMobile) {
-    if (accountParam) {
-      // Cross-account: use OAuth (LIFF won't work across accounts)
+    if (!liffUrl || accountParam) {
+      // LIFF未設定 or クロスアカウント → OAuth使用
       return c.redirect(loginUrl.toString());
     }
     return c.redirect(qrUrl);
   }
 
-  // PC: show QR code page
+  // PC: LIFFが設定されていればQRコード、なければOAuthへリダイレクト
+  if (!liffUrl) {
+    return c.redirect(loginUrl.toString());
+  }
+
+  // PC + LIFF設定済み: QRコードページ表示
   return c.html(`<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -457,6 +460,215 @@ liffRoutes.get('/auth/callback', async (c) => {
   } catch (err) {
     console.error('Auth callback error:', err);
     return c.html(errorPage('Internal error'));
+  }
+});
+
+// ─── LIFF App Page ──────────────────────────────────────────────
+
+/**
+ * GET /liff — LIFFアプリページ
+ * LINEアプリ内ブラウザで開かれ、自動認証 → トラッキング保存 → 友だち追加へリダイレクト
+ */
+liffRoutes.get('/liff', async (c) => {
+  return c.html(`<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>読み込み中...</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #06C755; font-family: 'Hiragino Sans', system-ui, sans-serif; }
+    .wrap { text-align: center; color: #fff; padding: 24px; }
+    .spinner { width: 48px; height: 48px; border: 4px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 20px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    p { font-size: 15px; opacity: 0.9; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="spinner"></div>
+    <p id="msg">処理中...</p>
+  </div>
+  <script>
+  (async function() {
+    var msg = document.getElementById('msg');
+    try {
+      // liff.state から liffId を取得（init前でも動作するよう両方チェック）
+      function getParam(key) {
+        var direct = new URLSearchParams(window.location.search).get(key);
+        if (direct) return direct;
+        var liffState = new URLSearchParams(window.location.search).get('liff.state');
+        if (liffState) {
+          try {
+            var s = decodeURIComponent(liffState);
+            return new URLSearchParams(s.startsWith('?') ? s.slice(1) : s).get(key);
+          } catch(e) { return null; }
+        }
+        return null;
+      }
+
+      var liffId = getParam('liffId');
+      if (!liffId) { msg.textContent = 'URLが正しくありません'; return; }
+
+      await liff.init({ liffId: liffId });
+
+      // init後にURLパラメーターが復元される
+      var p = new URLSearchParams(window.location.search);
+      var ref       = p.get('ref')        || '';
+      var account   = p.get('account')    || '';
+      var gclid     = p.get('gclid')      || '';
+      var fbclid    = p.get('fbclid')     || '';
+      var utmSource = p.get('utm_source') || '';
+
+      if (!liff.isLoggedIn()) {
+        liff.login({ redirectUri: window.location.href });
+        return;
+      }
+
+      var idToken = liff.getIDToken();
+
+      var res = await fetch('/api/liff/track', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken: idToken, ref: ref, account: account, gclid: gclid, fbclid: fbclid, utmSource: utmSource })
+      });
+      var data = await res.json();
+
+      if (data.data && data.data.addFriendUrl) {
+        window.location.href = data.data.addFriendUrl;
+      } else {
+        liff.closeWindow();
+      }
+    } catch(e) {
+      console.error(e);
+      msg.textContent = 'エラーが発生しました。もう一度お試しください。';
+    }
+  })();
+  </script>
+</body>
+</html>`);
+});
+
+/**
+ * POST /api/liff/track — LIFFトラッキング
+ * IDトークン検証 → 友だち登録 → refコード保存 → タグ付与 → 友だち追加URLを返す
+ */
+liffRoutes.post('/api/liff/track', async (c) => {
+  try {
+    const body = await c.req.json<{
+      idToken: string;
+      ref?: string;
+      account?: string;
+      gclid?: string;
+      fbclid?: string;
+      utmSource?: string;
+    }>();
+
+    if (!body.idToken) {
+      return c.json({ success: false, error: 'idToken required' }, 400);
+    }
+
+    const db = c.env.DB;
+
+    // IDトークン検証（登録済みLoginチャネル全て試す）
+    const loginChannelIds: string[] = [];
+    if (c.env.LINE_LOGIN_CHANNEL_ID) loginChannelIds.push(c.env.LINE_LOGIN_CHANNEL_ID);
+    const dbAccounts = await getLineAccounts(db);
+    for (const acct of dbAccounts) {
+      if (acct.login_channel_id && !loginChannelIds.includes(acct.login_channel_id)) {
+        loginChannelIds.push(acct.login_channel_id);
+      }
+    }
+
+    let verifyRes: Response | null = null;
+    for (const channelId of loginChannelIds) {
+      const r = await fetch('https://api.line.me/oauth2/v2.1/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ id_token: body.idToken, client_id: channelId }),
+      });
+      if (r.ok) { verifyRes = r; break; }
+    }
+
+    if (!verifyRes?.ok) {
+      return c.json({ success: false, error: 'Invalid ID token' }, 401);
+    }
+
+    const verified = await verifyRes.json<{ sub: string; name?: string; picture?: string }>();
+    const lineUserId = verified.sub;
+
+    // 友だちをUpsert
+    const friend = await upsertFriend(db, {
+      lineUserId,
+      displayName: verified.name ?? null,
+      pictureUrl: verified.picture ?? null,
+      statusMessage: null,
+    });
+
+    // line_account_id をセット
+    let lineAccount = null;
+    if (body.account) {
+      lineAccount = await getLineAccountByChannelId(db, body.account);
+      if (lineAccount) {
+        await db.prepare('UPDATE friends SET line_account_id = ? WHERE id = ? AND line_account_id IS NULL')
+          .bind(lineAccount.id, friend.id).run();
+      }
+    }
+
+    // lc:registered タグ付与
+    const registeredTag = await db.prepare("SELECT id FROM tags WHERE name = 'lc:registered' LIMIT 1").first<{ id: string }>();
+    if (registeredTag) await addTagToFriend(db, friend.id, registeredTag.id);
+
+    // refコード保存 → entry_routeタグ付与
+    if (body.ref) {
+      await db.prepare('UPDATE friends SET ref_code = ? WHERE id = ? AND ref_code IS NULL')
+        .bind(body.ref, friend.id).run();
+
+      const route = await getEntryRouteByRefCode(db, body.ref);
+      if (route) {
+        if (route.tag_id)   await addTagToFriend(db, friend.id, route.tag_id);
+        if (route.tag_id_2) await addTagToFriend(db, friend.id, route.tag_id_2);
+        if (route.tag_id_3) await addTagToFriend(db, friend.id, route.tag_id_3);
+        await recordRefTracking(db, { refCode: body.ref, friendId: friend.id, entryRouteId: route.id });
+      }
+    } else {
+      // refなし → src:organic
+      const organicTag = await db.prepare("SELECT id FROM tags WHERE name = 'src:organic' LIMIT 1").first<{ id: string }>();
+      if (organicTag) await addTagToFriend(db, friend.id, organicTag.id);
+    }
+
+    // 広告パラメーターによる追加タグ
+    if (body.gclid) {
+      const t = await db.prepare("SELECT id FROM tags WHERE name = 'src:search_google' LIMIT 1").first<{ id: string }>();
+      if (t) await addTagToFriend(db, friend.id, t.id);
+    }
+    if (body.fbclid) {
+      const t = await db.prepare("SELECT id FROM tags WHERE name = 'src:ad_meta' LIMIT 1").first<{ id: string }>();
+      if (t) await addTagToFriend(db, friend.id, t.id);
+    }
+
+    // 友だち追加URLを生成して返す
+    let addFriendUrl: string | null = null;
+    if (lineAccount) {
+      try {
+        const botRes = await fetch('https://api.line.me/v2/bot/info', {
+          headers: { Authorization: `Bearer ${lineAccount.channel_access_token}` },
+        });
+        if (botRes.ok) {
+          const bot = await botRes.json() as { basicId?: string };
+          if (bot.basicId) addFriendUrl = `https://line.me/R/ti/p/${bot.basicId}`;
+        }
+      } catch { /* ignore */ }
+    }
+
+    console.log(`[liff/track] friend=${friend.id} ref=${body.ref} gclid=${!!body.gclid} addFriendUrl=${addFriendUrl}`);
+    return c.json({ success: true, data: { addFriendUrl } });
+
+  } catch (err) {
+    console.error('POST /api/liff/track error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
 
