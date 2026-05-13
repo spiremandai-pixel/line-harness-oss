@@ -88,6 +88,7 @@ export interface CreateScenarioInput {
   description?: string | null;
   triggerType: ScenarioTriggerType;
   triggerTagId?: string | null;
+  lineAccountId?: string | null;
 }
 
 export async function createScenario(
@@ -99,8 +100,8 @@ export async function createScenario(
 
   await db
     .prepare(
-      `INSERT INTO scenarios (id, name, description, trigger_type, trigger_tag_id, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+      `INSERT INTO scenarios (id, name, description, trigger_type, trigger_tag_id, line_account_id, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     )
     .bind(
       id,
@@ -108,6 +109,7 @@ export async function createScenario(
       input.description ?? null,
       input.triggerType,
       input.triggerTagId ?? null,
+      input.lineAccountId ?? null,
       now,
       now,
     )

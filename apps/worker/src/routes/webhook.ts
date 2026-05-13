@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { verifySignature, LineClient } from '@line-crm/line-sdk';
-import type { WebhookRequestBody, WebhookEvent, TextEventMessage } from '@line-crm/line-sdk';
+import type { WebhookRequestBody, WebhookEvent, TextEventMessage, Message } from '@line-crm/line-sdk';
 import {
   upsertFriend,
   updateFriendFollowStatus,
@@ -12,6 +12,7 @@ import {
   completeFriendScenario,
   upsertChatOnMessage,
   getLineAccounts,
+  addTagToFriend,
   jstNow,
 } from '@line-crm/db';
 import { fireEvent } from '../services/event-bus.js';
@@ -172,6 +173,34 @@ async function handleEvent(
       }
     }
 
+    // 自動タグ付与: lc:registered（全員）+ src:organic（ref_codeなし）
+    try {
+      const registeredTag = await db
+        .prepare(`SELECT id FROM tags WHERE name = 'lc:registered' LIMIT 1`)
+        .first<{ id: string }>();
+      if (registeredTag) {
+        await addTagToFriend(db, friend.id, registeredTag.id);
+        console.log(`[autoTag] lc:registered 付与 friend=${friend.id}`);
+      }
+
+      // ref_code がない場合は src:organic を付与
+      const friendRow = await db
+        .prepare(`SELECT ref_code FROM friends WHERE id = ? LIMIT 1`)
+        .bind(friend.id)
+        .first<{ ref_code: string | null }>();
+      if (!friendRow?.ref_code) {
+        const organicTag = await db
+          .prepare(`SELECT id FROM tags WHERE name = 'src:organic' LIMIT 1`)
+          .first<{ id: string }>();
+        if (organicTag) {
+          await addTagToFriend(db, friend.id, organicTag.id);
+          console.log(`[autoTag] src:organic 付与 friend=${friend.id}`);
+        }
+      }
+    } catch (err) {
+      console.error('[autoTag] follow タグ付与失敗:', err);
+    }
+
     // イベントバス発火: friend_add
     await fireEvent(db, 'friend_add', { friendId: friend.id, eventData: { displayName: friend.display_name } }, lineAccessToken, lineAccountId);
     return;
@@ -183,6 +212,60 @@ async function handleEvent(
     if (!userId) return;
 
     await updateFriendFollowStatus(db, userId, false);
+
+    // ステップ配信: 配信停止
+    try {
+      await db
+        .prepare(
+          `UPDATE user_step_status
+           SET unsubscribed_at = datetime('now'), step_status = 'stopped', updated_at = datetime('now')
+           WHERE line_user_id = ?`,
+        )
+        .bind(userId)
+        .run();
+      console.log(`[stepDist] unfollow → step_status=stopped user=${userId}`);
+    } catch (err) {
+      console.error('[stepDist] unfollow UPDATE 失敗:', err);
+    }
+    return;
+  }
+
+  if (event.type === 'postback') {
+    const userId = event.source.type === 'user' ? event.source.userId : undefined;
+    if (!userId) return;
+
+    const friend = await getFriendByLineUserId(db, userId);
+    if (!friend) return;
+
+    const params = new URLSearchParams(event.postback.data);
+    const payload = params.get('payload');
+    if (!payload) return;
+
+    const row = await db
+      .prepare('SELECT body_json FROM rich_menu_postback_responses WHERE payload = ?')
+      .bind(payload)
+      .first<{ body_json: string }>();
+
+    if (!row) {
+      console.warn('Unknown postback payload:', payload);
+      return;
+    }
+
+    try {
+      const body = JSON.parse(row.body_json) as { messages: unknown[] };
+      await lineClient.replyMessage(event.replyToken, body.messages as unknown as Message[]);
+
+      const outLogId = crypto.randomUUID();
+      await db
+        .prepare(
+          `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, created_at)
+           VALUES (?, ?, 'outgoing', 'text', ?, NULL, NULL, 'reply', ?)`,
+        )
+        .bind(outLogId, friend.id, payload, jstNow())
+        .run();
+    } catch (err) {
+      console.error('Failed to reply postback payload:', payload, err);
+    }
     return;
   }
 
@@ -197,6 +280,34 @@ async function handleEvent(
 
     const incomingText = textMessage.text;
     const now = jstNow();
+
+    // 営業時間外（10:00-20:00 JST 以外）は自動応答して終了
+    const jstDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+    const hour = jstDate.getHours();
+    if (hour < 10 || hour >= 20) {
+      const offHoursRow = await db
+        .prepare('SELECT body_json FROM rich_menu_postback_responses WHERE payload = ?')
+        .bind('off_hours_auto_reply')
+        .first<{ body_json: string }>();
+      if (offHoursRow) {
+        try {
+          const body = JSON.parse(offHoursRow.body_json) as { messages: unknown[] };
+          await lineClient.replyMessage(event.replyToken, body.messages as unknown as Message[]);
+          await upsertChatOnMessage(db, friend.id);
+          const offLogId = crypto.randomUUID();
+          await db
+            .prepare(
+              `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, created_at)
+               VALUES (?, ?, 'outgoing', 'text', ?, NULL, NULL, 'reply', ?)`,
+            )
+            .bind(offLogId, friend.id, 'off_hours_auto_reply', jstNow())
+            .run();
+        } catch (err) {
+          console.error('Failed to send off-hours reply:', err);
+        }
+        return;
+      }
+    }
     const logId = crypto.randomUUID();
 
     // 受信メッセージをログに記録

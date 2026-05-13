@@ -32,6 +32,7 @@ import { automations } from './routes/automations.js';
 import { richMenus } from './routes/rich-menus.js';
 import { trackedLinks } from './routes/tracked-links.js';
 import { forms } from './routes/forms.js';
+// stepDistribution は migration 020 で scenarios/scenario_steps に移行済み（削除）
 
 export type Env = {
   Bindings: {
@@ -151,6 +152,7 @@ async function scheduled(
     );
   }
   jobs.push(checkAccountHealth(env.DB));
+  // ステップ配信は processStepDeliveries（scenarios/scenario_steps）に統合済み
 
   await Promise.allSettled(jobs);
 }

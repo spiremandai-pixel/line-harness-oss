@@ -73,12 +73,13 @@ scenarios.get('/api/scenarios', async (c) => {
     const lineAccountId = c.req.query('lineAccountId');
     let items: DbScenarioWithStepCount[];
     if (lineAccountId) {
+      // アカウント専用 OR 共通（line_account_id IS NULL）のシナリオを返す
       const result = await c.env.DB
         .prepare(
           `SELECT s.*, COUNT(ss.id) as step_count
            FROM scenarios s
            LEFT JOIN scenario_steps ss ON s.id = ss.scenario_id
-           WHERE s.line_account_id = ?
+           WHERE s.line_account_id = ? OR s.line_account_id IS NULL
            GROUP BY s.id
            ORDER BY s.created_at DESC`,
         )
