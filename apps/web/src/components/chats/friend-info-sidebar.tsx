@@ -211,7 +211,7 @@ export default function FriendInfoSidebar({ friendId, chatStatus, operatorName }
               {richMenu.kind === 'loading' ? (
                 <p className="text-[11px] text-gray-400 italic">読み込み中...</p>
               ) : richMenu.kind === 'error' ? (
-                <p className="text-[11px] text-red-500 italic">取得に失敗しました</p>
+                <p className="text-[11px] text-gray-400 italic">未設定</p>
               ) : richMenu.id === null ? (
                 <p className="text-[11px] text-gray-400 italic">未設定</p>
               ) : (
