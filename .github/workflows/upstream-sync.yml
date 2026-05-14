@@ -1,0 +1,167 @@
+name: Upstream Sync Check
+
+# upstream (shudesu/line-harness-oss) に新しいコミットがあれば
+# マージブランチを作成して PR を自動オープンする。
+# マージ・コンフリクト解消・デプロイは手動で行う。
+
+on:
+  schedule:
+    # 毎週月曜 09:00 JST (00:00 UTC)
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '更新がなくても PR を作成する'
+        type: boolean
+        default: false
+
+jobs:
+  check-and-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/shudesu/line-harness-oss.git
+          git fetch upstream main --no-tags
+
+      - name: Check for new upstream commits
+        id: diff
+        run: |
+          COUNT=$(git rev-list HEAD..upstream/main --count)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+          if [ "$COUNT" -gt "0" ]; then
+            echo "has_updates=true" >> "$GITHUB_OUTPUT"
+
+            # upstream の最新タグ（あれば）
+            LATEST_TAG=$(git describe --tags upstream/main 2>/dev/null || echo "")
+            echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+
+            # コミット一覧（最大20件）
+            COMMITS=$(git log HEAD..upstream/main --oneline | head -20)
+            # 複数行を GITHUB_OUTPUT に渡す
+            {
+              echo "commits<<EOF"
+              echo "$COMMITS"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+
+            # 変更ファイル一覧
+            FILES=$(git diff --name-only HEAD upstream/main | head -30)
+            {
+              echo "files<<EOF"
+              echo "$FILES"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if no updates
+        if: steps.diff.outputs.has_updates == 'false' && github.event.inputs.force != 'true'
+        run: |
+          echo "✅ upstream に新しいコミットはありません。スキップします。"
+
+      - name: Create sync branch and attempt merge
+        if: steps.diff.outputs.has_updates == 'true' || github.event.inputs.force == 'true'
+        id: merge
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          BRANCH="upstream-sync-$(date +%Y-%m-%d)"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          git checkout -b "$BRANCH"
+
+          # マージを試みる。コンフリクトがあっても PR は作成する
+          MERGE_STATUS="success"
+          if ! git merge upstream/main --no-edit --allow-unrelated-histories 2>/dev/null; then
+            MERGE_STATUS="conflict"
+            # コンフリクトファイルをそのままステージして commit
+            git add -A
+            git commit -m "chore: upstream sync attempt $(date +%Y-%m-%d) [conflicts need resolution]" || true
+          fi
+
+          echo "merge_status=$MERGE_STATUS" >> "$GITHUB_OUTPUT"
+          git push origin "$BRANCH"
+
+      - name: Open Pull Request
+        if: steps.diff.outputs.has_updates == 'true' || github.event.inputs.force == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ steps.merge.outputs.branch }}"
+          COUNT="${{ steps.diff.outputs.count }}"
+          MERGE_STATUS="${{ steps.merge.outputs.merge_status }}"
+          LATEST_TAG="${{ steps.diff.outputs.latest_tag }}"
+
+          if [ "$MERGE_STATUS" = "conflict" ]; then
+            MERGE_NOTE="⚠️ **マージコンフリクトがあります。** PR をチェックアウトしてコンフリクトを解消してください。"
+            TITLE_PREFIX="⚠️"
+          else
+            MERGE_NOTE="✅ 自動マージに成功しました。内容を確認してからマージしてください。"
+            TITLE_PREFIX="⬆️"
+          fi
+
+          TAG_LINE=""
+          if [ -n "$LATEST_TAG" ]; then
+            TAG_LINE="**最新タグ:** \`$LATEST_TAG\`"
+          fi
+
+          gh pr create \
+            --title "${TITLE_PREFIX} upstream 更新 (${COUNT}件のコミット) $(date +%Y-%m-%d)" \
+            --body "## upstream に新しい変更があります
+
+upstream: \`shudesu/line-harness-oss\`
+新規コミット数: **${COUNT}** 件
+${TAG_LINE}
+
+${MERGE_NOTE}
+
+---
+
+### 新しいコミット（最大20件）
+\`\`\`
+${{ steps.diff.outputs.commits }}
+\`\`\`
+
+### 変更ファイル（最大30件）
+\`\`\`
+${{ steps.diff.outputs.files }}
+\`\`\`
+
+---
+
+## ✅ マージ後にやること
+
+1. **DBマイグレーション確認**
+   - \`packages/db/migrations/\` に新しい \`.sql\` ファイルがあれば内容を確認
+   - 既存カラムへの重複追加がないかチェック
+   - \`npx wrangler d1 execute line-crm --remote --file=...\` で適用
+
+2. **Worker ビルド＆デプロイ**
+   \`\`\`
+   cd apps/worker && pnpm build
+   npx wrangler deploy
+   \`\`\`
+
+3. **フロントエンド確認**
+   - GitHub main へのプッシュで Vercel が自動デプロイします
+
+4. **カスタマイズが消えていないか確認**
+   - \`apps/worker/wrangler.toml\` (worker名: line-crm-worker)
+   - \`packages/db/migrations/041_\` 〜 \`063_\` (DENBAカスタムマイグレーション)
+" \
+            --base main \
+            --head "$BRANCH"
