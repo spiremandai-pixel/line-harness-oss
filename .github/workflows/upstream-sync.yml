@@ -98,6 +98,7 @@ jobs:
 
       - name: Open Pull Request
         if: steps.diff.outputs.has_updates == 'true' || github.event.inputs.force == 'true'
+        id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -119,7 +120,7 @@ jobs:
             TAG_LINE="**最新タグ:** \`$LATEST_TAG\`"
           fi
 
-          gh pr create \
+          PR_URL=$(gh pr create \
             --title "${TITLE_PREFIX} upstream 更新 (${COUNT}件のコミット) $(date +%Y-%m-%d)" \
             --body "## upstream に新しい変更があります
 
@@ -164,4 +165,38 @@ ${{ steps.diff.outputs.files }}
    - \`packages/db/migrations/041_\` 〜 \`063_\` (DENBAカスタムマイグレーション)
 " \
             --base main \
-            --head "$BRANCH"
+            --head "$BRANCH")
+
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "merge_status=$MERGE_STATUS" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Chatwork
+        if: steps.diff.outputs.has_updates == 'true' || github.event.inputs.force == 'true'
+        env:
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
+          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+        run: |
+          PR_URL="${{ steps.pr.outputs.pr_url }}"
+          COUNT="${{ steps.pr.outputs.count }}"
+          MERGE_STATUS="${{ steps.pr.outputs.merge_status }}"
+
+          if [ "$MERGE_STATUS" = "conflict" ]; then
+            STATUS_ICON="⚠️"
+            STATUS_TEXT="コンフリクトあり（手動解消が必要）"
+          else
+            STATUS_ICON="✅"
+            STATUS_TEXT="自動マージ成功"
+          fi
+
+          MESSAGE="${STATUS_ICON} [LINE Harness OSS] upstream に更新があります
+
+新規コミット: ${COUNT}件
+マージ状態: ${STATUS_TEXT}
+
+PR を確認してマージしてください:
+${PR_URL}"
+
+          curl -s -X POST "https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages" \
+            -H "x-chatworktoken: ${CHATWORK_API_TOKEN}" \
+            --data-urlencode "body=${MESSAGE}"
