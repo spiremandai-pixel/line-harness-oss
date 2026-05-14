@@ -417,6 +417,7 @@ async function handleEvent(
       console.error('Failed to log incoming postback', err);
     }
 
+    let autoReplied = false;
     for (const rule of autoReplies.results) {
       const isMatch = rule.match_type === 'exact'
         ? postbackData === rule.keyword
@@ -449,7 +450,48 @@ async function handleEvent(
         } catch (err) {
           console.error('Failed to send postback reply', err);
         }
+        autoReplied = true;
         break;
+      }
+    }
+
+    // auto_replies にマッチしなかった場合、rich_menu_postback_responses を参照する。
+    // リッチメニューのボタン postback data は "payload=<key>" 形式で送られる。
+    if (!autoReplied) {
+      try {
+        // "payload=store_select_carousel" → "store_select_carousel"
+        const payloadKey = postbackData.startsWith('payload=')
+          ? postbackData.slice('payload='.length)
+          : postbackData;
+
+        const richMenuResponse = await db
+          .prepare('SELECT body_json FROM rich_menu_postback_responses WHERE payload = ?')
+          .bind(payloadKey)
+          .first<{ body_json: string }>();
+
+        if (richMenuResponse) {
+          const parsed = JSON.parse(richMenuResponse.body_json) as { messages: Message[] };
+          const messages = parsed.messages ?? [];
+          if (messages.length > 0) {
+            await lineClient.replyMessage(event.replyToken, messages);
+
+            // 送信ログ（最初のメッセージを代表として記録）
+            const firstMsg = messages[0];
+            const logType = firstMsg.type;
+            const logContent = logType === 'text'
+              ? (firstMsg as { type: string; text: string }).text
+              : JSON.stringify(firstMsg);
+            await db
+              .prepare(
+                `INSERT INTO messages_log (id, friend_id, direction, message_type, content, broadcast_id, scenario_step_id, delivery_type, source, line_account_id, created_at)
+                 VALUES (?, ?, 'outgoing', ?, ?, NULL, NULL, 'reply', 'auto_reply', ?, ?)`,
+              )
+              .bind(crypto.randomUUID(), friend.id, logType, logContent, lineAccountId ?? null, jstNow())
+              .run();
+          }
+        }
+      } catch (err) {
+        console.error('Failed to send rich_menu_postback_response reply', err);
       }
     }
     return;
